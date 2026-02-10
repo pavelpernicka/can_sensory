@@ -41,6 +41,11 @@
 #define BL_STAY_MAGIC_VALUE   ((uint32_t)0xB007B007UL)
 
 // I2C
+#define BL_I2C_INSTANCE             I2C1
+#define BL_I2C_SCL_GPIO_PORT        GPIOB
+#define BL_I2C_SCL_PIN              GPIO_PIN_6
+#define BL_I2C_SDA_GPIO_PORT        GPIOB
+#define BL_I2C_SDA_PIN              GPIO_PIN_7
 #define BL_I2C_GPIO_AF              GPIO_AF4_I2C1
 #define BL_I2C_TIMING               0x0020098EU
 #define BL_I2C_TIMEOUT_MS           50U

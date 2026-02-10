@@ -54,11 +54,11 @@ SECTIONS
     PROVIDE_HIDDEN (__fini_array_end = .);
   } > FLASH
 
-  // konec FLASH sekcí
+  /* end of FLASH sections */
   . = ALIGN(4);
   _etext = .;
 
-  //initialized data
+  /* initialized data */
   .data : AT(_etext)
   {
     . = ALIGN(4);
@@ -68,7 +68,7 @@ SECTIONS
   } > RAM
   _sidata = LOADADDR(.data);
 
-  // BSS
+  /* BSS */
   .bss :
   {
     . = ALIGN(4);
