@@ -1,0 +1,10 @@
+*.o
+*.elf
+*.bin
+*.map
+*.d
+__pycache__/
+*.pyc
+*.pyo
+
+third_party/*
