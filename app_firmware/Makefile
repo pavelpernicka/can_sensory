@@ -21,6 +21,10 @@ SRCS = \
   $(SRCDIR)/main.c \
   $(SRCDIR)/app_can.c \
   $(SRCDIR)/calibration.c \
+  $(SRCDIR)/sensor_i2c.c \
+  $(SRCDIR)/sensor_hmc5883l.c \
+  $(SRCDIR)/sensor_lis3dhtr.c \
+  $(SRCDIR)/sensor_aht20.c \
   $(SRCDIR)/sensors.c \
   $(SRCDIR)/events.c \
   $(SRCDIR)/stm32l4xx_hal_msp.c

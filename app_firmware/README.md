@@ -18,7 +18,10 @@ make flash_openocd
 ```
 Or using bootloader CLI tool:
 ```bash
-./bl_can_tool.py --interface socketcan --channel slcan0 --device-id 3 update app_firmware.bin --boot
+cd app_firmware
+./app_can_tool.py --interface socketcan --channel slcan0 --device-id 3 enter-bootloader
+cd ..
+./bl_can_tool.py --interface socketcan --channel slcan0 --device-id 3 update app_firmware/app_firmware.bin --boot
 ```
 
 When flashing manually, make sure to enter right address `0x08004000`. 
