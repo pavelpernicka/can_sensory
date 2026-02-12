@@ -31,11 +31,6 @@ static uint32_t g_env_next_trigger_ms;
 static uint32_t g_env_ready_ms;
 static uint8_t g_env_retry;
 
-#define HMC5883L_RANGE_DEFAULT      7U
-#define HMC5883L_DATA_RATE_DEFAULT  4U
-#define HMC5883L_SAMPLES_DEFAULT    3U
-#define HMC5883L_MODE_DEFAULT       0U
-
 static int16_t clamp_i16(int32_t v)
 {
     if (v > 32767) {
@@ -104,11 +99,11 @@ void Sensors_Init(I2C_HandleTypeDef *hi2c)
     g_hmc_earth_y_mg = 0;
     g_hmc_earth_z_mg = 0;
     g_hmc_earth_valid = 0U;
-    g_hmc_range = HMC5883L_RANGE_DEFAULT;
-    g_hmc_data_rate = HMC5883L_DATA_RATE_DEFAULT;
-    g_hmc_samples = HMC5883L_SAMPLES_DEFAULT;
-    g_hmc_mode = HMC5883L_MODE_DEFAULT;
-    g_hmc_mg_per_digit_centi = SensorHMC5883L_RangeToMgPerDigitCenti(HMC5883L_RANGE_DEFAULT);
+    g_hmc_range = APP_HMC_DEFAULT_RANGE;
+    g_hmc_data_rate = APP_HMC_DEFAULT_DATA_RATE;
+    g_hmc_samples = APP_HMC_DEFAULT_SAMPLES;
+    g_hmc_mode = APP_HMC_DEFAULT_MODE;
+    g_hmc_mg_per_digit_centi = SensorHMC5883L_RangeToMgPerDigitCenti(APP_HMC_DEFAULT_RANGE);
 
     if (!SensorI2C_Init(hi2c)) {
         return;
@@ -341,11 +336,11 @@ void Sensors_ApplyCalibration(const app_calibration_t *cal)
     if (st != 0 && st != 3) {
         uint16_t mg;
 
-        g_hmc_range = HMC5883L_RANGE_DEFAULT;
-        g_hmc_data_rate = HMC5883L_DATA_RATE_DEFAULT;
-        g_hmc_samples = HMC5883L_SAMPLES_DEFAULT;
-        g_hmc_mode = HMC5883L_MODE_DEFAULT;
-        g_hmc_mg_per_digit_centi = SensorHMC5883L_RangeToMgPerDigitCenti(HMC5883L_RANGE_DEFAULT);
+        g_hmc_range = APP_HMC_DEFAULT_RANGE;
+        g_hmc_data_rate = APP_HMC_DEFAULT_DATA_RATE;
+        g_hmc_samples = APP_HMC_DEFAULT_SAMPLES;
+        g_hmc_mode = APP_HMC_DEFAULT_MODE;
+        g_hmc_mg_per_digit_centi = SensorHMC5883L_RangeToMgPerDigitCenti(APP_HMC_DEFAULT_RANGE);
 
         if (g_sensor_status.hmc_present) {
             mg = g_hmc_mg_per_digit_centi;

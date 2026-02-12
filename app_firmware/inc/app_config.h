@@ -50,7 +50,12 @@
 #define APP_CALIB_FLASH_PAGE_SIZE     0x800U
 
 // Sampling defaults
-#define APP_MAG_SAMPLE_PERIOD_MS      20U
+#define APP_HMC_DEFAULT_RANGE         7U   /* 8.1 gauss range */
+#define APP_HMC_DEFAULT_DATA_RATE     6U   /* 75 Hz */
+#define APP_HMC_DEFAULT_SAMPLES       0U   /* 1 sample */
+#define APP_HMC_DEFAULT_MODE          0U   /* continuous */
+
+#define APP_MAG_SAMPLE_PERIOD_MS      10U
 #define APP_ACC_SAMPLE_PERIOD_MS      20U
 #define APP_ENV_TRIGGER_PERIOD_MS     1000U
 #define APP_ENV_CONVERSION_MS         90U

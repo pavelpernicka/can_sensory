@@ -26,6 +26,7 @@ SRCS = \
   $(SRCDIR)/sensor_lis3dhtr.c \
   $(SRCDIR)/sensor_aht20.c \
   $(SRCDIR)/sensors.c \
+  $(SRCDIR)/event_detector.c \
   $(SRCDIR)/events.c \
   $(SRCDIR)/stm32l4xx_hal_msp.c
 

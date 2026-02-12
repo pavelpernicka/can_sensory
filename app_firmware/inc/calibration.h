@@ -24,6 +24,7 @@ typedef struct {
     uint16_t interval_acc_ms;
     uint16_t interval_env_ms;
     uint16_t interval_event_ms;
+    uint8_t num_sectors;
     uint8_t hmc_range;
     uint8_t hmc_data_rate;
     uint8_t hmc_samples;
@@ -47,11 +48,12 @@ typedef enum {
     APP_CAL_FIELD_EARTH_X = 13,
     APP_CAL_FIELD_EARTH_Y = 14,
     APP_CAL_FIELD_EARTH_Z = 15,
-    APP_CAL_FIELD_EARTH_VALID = 16
+    APP_CAL_FIELD_EARTH_VALID = 16,
+    APP_CAL_FIELD_NUM_SECTORS = 17
 } app_cal_field_t;
 
 #define APP_CAL_FIELD_FIRST APP_CAL_FIELD_CENTER_X
-#define APP_CAL_FIELD_LAST  APP_CAL_FIELD_EARTH_VALID
+#define APP_CAL_FIELD_LAST  APP_CAL_FIELD_NUM_SECTORS
 
 void Calib_Init(void);
 const app_calibration_t *Calib_Get(void);

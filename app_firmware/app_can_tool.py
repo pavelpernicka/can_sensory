@@ -3,6 +3,7 @@ import argparse
 import math
 import sys
 import time
+from collections import deque
 import can
 from typing import Callable
 
@@ -99,6 +100,19 @@ FRAME_TYPES = {
     FRAME_HMC_CFG,
 }
 
+CMD_REPLY_FRAME_TYPES = {
+    FRAME_PONG,
+    FRAME_INTERVAL,
+    FRAME_STATUS,
+    FRAME_AHT20_MEAS,
+    FRAME_AHT20_RAW,
+    FRAME_AHT20_STATUS,
+    FRAME_AHT20_REG,
+    FRAME_CALIB_VALUE,
+    FRAME_CALIB_INFO,
+    FRAME_HMC_CFG,
+}
+
 CAL_FIELD_NAME_TO_ID = {
     "center_x": 1,
     "center_y": 2,
@@ -116,6 +130,7 @@ CAL_FIELD_NAME_TO_ID = {
     "earth_y": 14,
     "earth_z": 15,
     "earth_valid": 16,
+    "num_sectors": 17,
     "all": 0,
 }
 
@@ -158,20 +173,31 @@ HMC_MODE_ID_TO_NAME = {
 
 class AppCanClient:
     def __init__(self, channel: str, interface: str, device_id: int, timeout: float):
+        self.channel = channel
+        self.interface = interface
+        self.timeout = timeout
+        self.device_id = 0
+        self.cmd_id = 0
+        self.status_id = 0
+        self._set_device_id_local(device_id)
+
+        self.bus = self._open_bus_for_status_id(self.status_id)
+        self._pending_frames = deque()
+
+    def _set_device_id_local(self, device_id: int) -> None:
         if device_id < 0 or device_id > 0x7F:
             raise ValueError("device-id must be 0..127")
-
         self.device_id = device_id
         self.cmd_id = 0x600 + device_id
         self.status_id = 0x580 + device_id
-        self.timeout = timeout
 
-        self.bus = can.Bus(
-            interface=interface,
-            channel=channel,
+    def _open_bus_for_status_id(self, status_id: int):
+        return can.Bus(
+            interface=self.interface,
+            channel=self.channel,
             receive_own_messages=False,
             can_filters=[{
-                "can_id": self.status_id,
+                "can_id": status_id,
                 "can_mask": 0x7FF,
                 "extended": False,
             }],
@@ -179,6 +205,16 @@ class AppCanClient:
 
     def close(self) -> None:
         self.bus.shutdown()
+
+    def set_device_id(self, device_id: int) -> None:
+        if device_id == self.device_id:
+            return
+        self._set_device_id_local(device_id)
+        new_bus = self._open_bus_for_status_id(self.status_id)
+        old_bus = self.bus
+        self.bus = new_bus
+        self._pending_frames.clear()
+        old_bus.shutdown()
 
     def send(self, payload: bytes) -> None:
         if len(payload) > 8:
@@ -190,8 +226,43 @@ class AppCanClient:
         )
         self.bus.send(msg)
 
+    def send_command(self, payload: bytes) -> None:
+        # Drop stale streamed frames on the command socket so we don't parse old backlog
+        # before the current command response.
+        self.flush_pending_rx()
+        self.send(payload)
+
     def recv(self, timeout: float | None = None):
         return self.bus.recv(self.timeout if timeout is None else timeout)
+
+    def flush_pending_rx(self, max_frames: int = 1024, max_ms: float = 30.0) -> int:
+        self._pending_frames.clear()
+        dropped = 0
+        t0 = time.monotonic()
+        while dropped < max_frames:
+            if (time.monotonic() - t0) * 1000.0 >= max_ms:
+                break
+            msg = self.recv(0.0)
+            if msg is None:
+                break
+            dropped += 1
+        return dropped
+
+    def _next_frame(self, timeout_s: float) -> bytes | None:
+        if self._pending_frames:
+            return self._pending_frames.popleft()
+        msg = self.recv(timeout_s)
+        if msg is None:
+            return None
+        return bytes(msg.data)
+
+    @staticmethod
+    def _is_possible_cmd_reply(data: bytes) -> bool:
+        if len(data) >= 4 and data[:4] == b"PONG":
+            return True
+        if len(data) >= 2 and data[0] == 0 and data[1] in CMD_REPLY_FRAME_TYPES:
+            return True
+        return False
 
     @staticmethod
     def is_status_reply(data: bytes) -> bool:
@@ -203,12 +274,16 @@ class AppCanClient:
 
     def wait_status(self, expected_extra: int, timeout: float | None = None) -> bytes:
         deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
+        deferred = deque()
         while time.monotonic() < deadline:
-            msg = self.recv(max(0.0, deadline - time.monotonic()))
-            if msg is None:
+            data = self._next_frame(max(0.0, deadline - time.monotonic()))
+            if data is None:
                 continue
-            data = bytes(msg.data)
             if not self.is_status_reply(data):
+                # Keep only potentially useful command-reply frames; drop high-rate stream traffic.
+                if self._is_possible_cmd_reply(data):
+                    if len(deferred) < 128:
+                        deferred.append(data)
                 continue
 
             if data[1] != expected_extra:
@@ -219,17 +294,20 @@ class AppCanClient:
                 raise RuntimeError(
                     f"Device error: {STATUS_TEXT.get(st, f'0x{st:02X}')} extra=0x{data[1]:02X}"
                 )
+            if deferred:
+                self._pending_frames.extendleft(reversed(deferred))
             return data
 
+        if deferred:
+            self._pending_frames.extendleft(reversed(deferred))
         raise TimeoutError(f"Timeout waiting for status extra=0x{expected_extra:02X}")
 
     def wait_frame(self, predicate: Callable[[bytes], bool], timeout: float | None = None) -> bytes:
         deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
         while time.monotonic() < deadline:
-            msg = self.recv(max(0.0, deadline - time.monotonic()))
-            if msg is None:
+            data = self._next_frame(max(0.0, deadline - time.monotonic()))
+            if data is None:
                 continue
-            data = bytes(msg.data)
 
             if self.is_status_reply(data):
                 st = data[0]
@@ -245,25 +323,16 @@ class AppCanClient:
         raise TimeoutError("Timeout waiting for frame")
 
     def ping(self) -> bytes:
-        self.send(bytes([CMD_PING]))
+        self.send_command(bytes([CMD_PING]))
         self.wait_status(expected_extra=0x01)
-
-        deadline = time.monotonic() + self.timeout
-        while time.monotonic() < deadline:
-            msg = self.recv(max(0.0, deadline - time.monotonic()))
-            if msg is None:
-                continue
-            data = bytes(msg.data)
-            if len(data) >= 4 and data[:4] == b"PONG":
-                return data
-        return b""
+        return self.wait_frame(lambda d: len(d) >= 4 and d[:4] == b"PONG")
 
     def enter_bootloader(self) -> None:
-        self.send(bytes([CMD_ENTER_BOOTLOADER]))
+        self.send_command(bytes([CMD_ENTER_BOOTLOADER]))
         self.wait_status(expected_extra=0x40)
 
     def hmc_get_config(self) -> dict:
-        self.send(bytes([CMD_HMC_GET_CFG]))
+        self.send_command(bytes([CMD_HMC_GET_CFG]))
         self.wait_status(expected_extra=0x6F)
         frame = self.wait_frame(lambda d: len(d) >= 8 and d[0] == 0 and d[1] == FRAME_HMC_CFG)
         return parse_hmc_cfg_frame(frame)
@@ -278,7 +347,7 @@ class AppCanClient:
         if mode_id < 0 or mode_id > 2:
             raise ValueError("hmc mode must be 0..2")
 
-        self.send(bytes([CMD_HMC_SET_CFG, range_id, data_rate_id, samples_id, mode_id]))
+        self.send_command(bytes([CMD_HMC_SET_CFG, range_id, data_rate_id, samples_id, mode_id]))
         self.wait_status(expected_extra=0x6E)
         frame = self.wait_frame(lambda d: len(d) >= 8 and d[0] == 0 and d[1] == FRAME_HMC_CFG)
         return parse_hmc_cfg_frame(frame)
@@ -289,7 +358,7 @@ class AppCanClient:
         if interval_ms < 0 or interval_ms > 60000:
             raise ValueError("interval must be 0..60000 ms")
 
-        self.send(bytes([
+        self.send_command(bytes([
             CMD_SET_INTERVAL,
             stream_id,
             interval_ms & 0xFF,
@@ -306,7 +375,7 @@ class AppCanClient:
         if stream_id < 1 or stream_id > 4:
             raise ValueError("stream-id must be 1..4")
 
-        self.send(bytes([CMD_SET_STREAM_ENABLE, stream_id, 1 if enable else 0]))
+        self.send_command(bytes([CMD_SET_STREAM_ENABLE, stream_id, 1 if enable else 0]))
         self.wait_status(expected_extra=stream_id)
 
         frame = self.wait_frame(
@@ -318,7 +387,7 @@ class AppCanClient:
         if stream_id < 0 or stream_id > 4:
             raise ValueError("stream-id must be 0..4")
 
-        self.send(bytes([CMD_GET_INTERVAL, stream_id]))
+        self.send_command(bytes([CMD_GET_INTERVAL, stream_id]))
 
         expected_count = 4 if stream_id == 0 else 1
         results: dict[int, dict] = {}
@@ -340,14 +409,14 @@ class AppCanClient:
         return [results[sid] for sid in sorted(results.keys())]
 
     def get_status(self) -> dict:
-        self.send(bytes([CMD_GET_STATUS]))
+        self.send_command(bytes([CMD_GET_STATUS]))
         self.wait_status(expected_extra=0x73)
 
         frame = self.wait_frame(lambda d: len(d) >= 8 and d[0] == 0 and d[1] == FRAME_STATUS)
         return parse_status_frame(frame)
 
     def aht20_read(self) -> dict:
-        self.send(bytes([CMD_AHT20_READ]))
+        self.send_command(bytes([CMD_AHT20_READ]))
         self.wait_status(expected_extra=0x74)
 
         meas = None
@@ -373,10 +442,10 @@ class AppCanClient:
         }
 
     def calib_get(self, field_id: int = 0) -> list[dict]:
-        if field_id < 0 or field_id > 16:
-            raise ValueError("calib field-id must be 0..16")
+        if field_id < 0 or field_id > 17:
+            raise ValueError("calib field-id must be 0..17")
 
-        self.send(bytes([CMD_CALIB_GET, field_id]))
+        self.send_command(bytes([CMD_CALIB_GET, field_id]))
         if field_id == 0:
             self.wait_status(expected_extra=0x79)
             expected = len(CAL_FIELD_ID_TO_NAME)
@@ -402,8 +471,8 @@ class AppCanClient:
         return [out[fid] for fid in sorted(out.keys())]
 
     def calib_set(self, field_id: int, value: int) -> dict:
-        if field_id < 1 or field_id > 16:
-            raise ValueError("calib field-id must be 1..16")
+        if field_id < 1 or field_id > 17:
+            raise ValueError("calib field-id must be 1..17")
         if value < -32768 or value > 32767:
             raise ValueError("calib value must be int16 range")
 
@@ -413,7 +482,7 @@ class AppCanClient:
             value & 0xFF,
             (value >> 8) & 0xFF,
         ])
-        self.send(payload)
+        self.send_command(payload)
         self.wait_status(expected_extra=field_id)
         frame = self.wait_frame(
             lambda d: len(d) >= 5 and d[0] == 0 and d[1] == FRAME_CALIB_VALUE and d[2] == field_id
@@ -421,25 +490,25 @@ class AppCanClient:
         return parse_calib_value_frame(frame)
 
     def calib_save(self) -> dict:
-        self.send(bytes([CMD_CALIB_SAVE]))
+        self.send_command(bytes([CMD_CALIB_SAVE]))
         self.wait_status(expected_extra=0x7B)
         frame = self.wait_frame(lambda d: len(d) >= 4 and d[0] == 0 and d[1] == FRAME_CALIB_INFO)
         return parse_calib_info_frame(frame)
 
     def calib_load(self) -> dict:
-        self.send(bytes([CMD_CALIB_LOAD]))
+        self.send_command(bytes([CMD_CALIB_LOAD]))
         self.wait_status(expected_extra=0x7C)
         frame = self.wait_frame(lambda d: len(d) >= 4 and d[0] == 0 and d[1] == FRAME_CALIB_INFO)
         return parse_calib_info_frame(frame)
 
     def calib_reset(self) -> dict:
-        self.send(bytes([CMD_CALIB_RESET]))
+        self.send_command(bytes([CMD_CALIB_RESET]))
         self.wait_status(expected_extra=0x7D)
         frame = self.wait_frame(lambda d: len(d) >= 4 and d[0] == 0 and d[1] == FRAME_CALIB_INFO)
         return parse_calib_info_frame(frame)
 
     def calib_capture_earth(self) -> dict:
-        self.send(bytes([CMD_CALIB_CAPTURE_EARTH]))
+        self.send_command(bytes([CMD_CALIB_CAPTURE_EARTH]))
         self.wait_status(expected_extra=0x7E)
         frame = self.wait_frame(lambda d: len(d) >= 4 and d[0] == 0 and d[1] == FRAME_CALIB_INFO)
         return parse_calib_info_frame(frame)
@@ -454,6 +523,76 @@ def decode_sensor_bits(bits: int) -> list[str]:
     if bits & (1 << 2):
         out.append("aht")
     return out
+
+
+def status_id_to_device_id(arbitration_id: int) -> int | None:
+    if arbitration_id < 0x580 or arbitration_id > 0x5FF:
+        return None
+    return arbitration_id - 0x580
+
+
+def discover_devices(
+    channel: str,
+    interface: str = "socketcan",
+    timeout: float = 0.35,
+    probe_ids: list[int] | None = None,
+) -> list[dict]:
+    if timeout <= 0.0:
+        timeout = 0.01
+
+    ids = list(range(128)) if probe_ids is None else [i for i in probe_ids if 0 <= i <= 0x7F]
+    bus = can.Bus(
+        interface=interface,
+        channel=channel,
+        receive_own_messages=False,
+        can_filters=[{
+            "can_id": 0x580,
+            "can_mask": 0x780,
+            "extended": False,
+        }],
+    )
+    found: dict[int, dict] = {}
+
+    try:
+        for did in ids:
+            bus.send(can.Message(arbitration_id=0x600 + did, is_extended_id=False, data=bytes([CMD_PING])))
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            msg = bus.recv(max(0.0, deadline - time.monotonic()))
+            if msg is None:
+                continue
+
+            did = status_id_to_device_id(msg.arbitration_id)
+            if did is None:
+                continue
+
+            data = bytes(msg.data)
+            rec = found.setdefault(did, {
+                "device_id": did,
+                "seen_frames": 0,
+                "ping_ok": False,
+                "pong": False,
+                "proto": None,
+                "sensors": [],
+                "streams": [],
+            })
+            rec["seen_frames"] += 1
+
+            if AppCanClient.is_status_reply(data) and len(data) >= 2 and data[0] == STATUS_OK and data[1] == CMD_PING:
+                rec["ping_ok"] = True
+            elif len(data) >= 4 and data[:4] == b"PONG":
+                rec["pong"] = True
+                if len(data) >= 6:
+                    rec["proto"] = int(data[5])
+            elif len(data) >= 8 and data[0] == 0 and data[1] == FRAME_STARTUP:
+                rec["proto"] = int(data[3])
+                rec["sensors"] = decode_sensor_bits(data[4])
+                rec["streams"] = decode_stream_bits(data[5])
+
+        return [found[k] for k in sorted(found.keys())]
+    finally:
+        bus.shutdown()
 
 
 def decode_stream_bits(bits: int) -> list[str]:
@@ -703,8 +842,8 @@ def calib_field_arg(value: str) -> int:
     if key in CAL_FIELD_NAME_TO_ID:
         return CAL_FIELD_NAME_TO_ID[key]
     iv = int(value, 0)
-    if iv < 0 or iv > 16:
-        raise argparse.ArgumentTypeError("calib field must be all|center_x..earth_valid or 0..16")
+    if iv < 0 or iv > 17:
+        raise argparse.ArgumentTypeError("calib field must be all|center_x..num_sectors or 0..17")
     return iv
 
 
@@ -784,7 +923,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--channel", default="can0", help="CAN channel (default: can0)")
     parser.add_argument("--interface", default="socketcan", help="python-can interface (default: socketcan)")
     parser.add_argument("--device-id", type=int, default=1, help="Device ID 0..127 (default: 1)")
-    parser.add_argument("--timeout", type=float, default=1.0, help="Response timeout seconds (default: 1.0)")
+    parser.add_argument("--timeout", type=float, default=2.5, help="Response timeout seconds (default: 2.5)")
 
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -824,7 +963,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cg.add_argument("--field", default="all", type=calib_field_arg, help="all or field name/id")
 
     p_cs = sub.add_parser("calib-set", help="Set one calibration value")
-    p_cs.add_argument("--field", required=True, type=calib_field_arg, help="field name/id (1..16)")
+    p_cs.add_argument("--field", required=True, type=calib_field_arg, help="field name/id (1..17)")
     p_cs.add_argument("--value", required=True, type=int, help="int16 value")
 
     sub.add_parser("calib-save", help="Save current calibration to flash")
@@ -958,7 +1097,7 @@ def main() -> int:
 
         if args.cmd == "calib-set":
             if args.field == 0:
-                raise ValueError("calib-set requires a specific field (1..16)")
+                raise ValueError("calib-set requires a specific field (1..17)")
             item = client.calib_set(args.field, args.value)
             print(f"CALIB_SET OK {item['field_name']}({item['field_id']})={item['value']}")
             return 0
