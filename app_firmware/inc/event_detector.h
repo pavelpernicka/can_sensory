@@ -17,6 +17,8 @@ typedef struct {
     float rotate_yz_deg;
     float keepout_rad;
     float z_limit;
+    float z_max;
+    float elev_curve;
     float data_radius;
     uint8_t num_sectors;
     float change_threshold;

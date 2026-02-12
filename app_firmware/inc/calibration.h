@@ -11,6 +11,8 @@ typedef struct {
     int16_t rotate_yz_cdeg;
     uint16_t keepout_rad_mg;
     int16_t z_limit_mg;
+    int16_t z_max_mg;
+    uint16_t elev_curve_centi;
     uint16_t data_radius_mg;
     int16_t mag_offset_x;
     int16_t mag_offset_y;
@@ -49,11 +51,13 @@ typedef enum {
     APP_CAL_FIELD_EARTH_Y = 14,
     APP_CAL_FIELD_EARTH_Z = 15,
     APP_CAL_FIELD_EARTH_VALID = 16,
-    APP_CAL_FIELD_NUM_SECTORS = 17
+    APP_CAL_FIELD_NUM_SECTORS = 17,
+    APP_CAL_FIELD_Z_MAX = 18,
+    APP_CAL_FIELD_ELEV_CURVE = 19
 } app_cal_field_t;
 
 #define APP_CAL_FIELD_FIRST APP_CAL_FIELD_CENTER_X
-#define APP_CAL_FIELD_LAST  APP_CAL_FIELD_NUM_SECTORS
+#define APP_CAL_FIELD_LAST  APP_CAL_FIELD_ELEV_CURVE
 
 void Calib_Init(void);
 const app_calibration_t *Calib_Get(void);

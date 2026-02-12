@@ -15,7 +15,7 @@ import gi
 import numpy as np
 from matplotlib.backends.backend_gtk4agg import FigureCanvasGTK4Agg as FigureCanvas
 from matplotlib.figure import Figure
-from event_detection import EventDetectionConfig, EventDetector, EVENT_NAMES
+from event_detection import Event, EventDetectionConfig, EventDetector, EVENT_NAMES
 
 from app_can_tool import (
     AppCanClient,
@@ -62,7 +62,9 @@ CALIB_FIELDS = [
     ("rotate_xz", "Rotate XZ (cdeg)", -36000, 36000, 10),
     ("rotate_yz", "Rotate YZ (cdeg)", -36000, 36000, 10),
     ("keepout_rad", "Keepout Radius (mG)", 0, 32767, 10),
-    ("z_limit", "Z Limit (mG)", -32768, 32767, 10),
+    ("z_limit", "Z Min (mG)", -32768, 32767, 10),
+    ("z_max", "Z Max (mG)", -32768, 32767, 10),
+    ("elev_curve", "Elev Curve x100", 10, 500, 5),
     ("data_radius", "Data Radius (mG)", 10, 32767, 10),
     ("num_sectors", "Sector Count", 1, 16, 1),
     ("mag_offset_x", "Mag Offset X", -32768, 32767, 1),
@@ -90,12 +92,20 @@ MAX_RENDER_ACC_POINTS = 1000
 MAX_RENDER_ENV_POINTS = 2000
 CMD_TIMEOUT_SHORT = 3.0
 CMD_TIMEOUT_LONG = 5.0
+EVENT_TYPE_IDS = sorted(EVENT_NAMES.keys())
 
 
 def compute_slope_cdeg(x_mg: int, y_mg: int, z_mg: int) -> int:
     horizontal = math.sqrt(float(x_mg) * float(x_mg) + float(y_mg) * float(y_mg))
     angle_deg = math.degrees(math.atan2(horizontal, abs(float(z_mg)) + 1e-6))
     return int(round(angle_deg * 100.0))
+
+
+def compute_plane_slopes_cdeg(x_mg: int, y_mg: int, z_mg: int) -> tuple[int, int, int]:
+    slope_xy = int(round(math.degrees(math.atan2(float(y_mg), float(x_mg) + 1e-6)) * 100.0))
+    slope_xz = int(round(math.degrees(math.atan2(float(z_mg), float(x_mg) + 1e-6)) * 100.0))
+    slope_yz = int(round(math.degrees(math.atan2(float(z_mg), float(y_mg) + 1e-6)) * 100.0))
+    return slope_xy, slope_xz, slope_yz
 
 
 def decimate_points(data, limit: int):
@@ -107,6 +117,56 @@ def decimate_points(data, limit: int):
         return data_list
     step = max(1, n // limit)
     return data_list[::step]
+
+
+def transform_mag_point_for_detector(x: float, y: float, z: float, calib: dict[str, int]) -> tuple[float, float, float]:
+    # Mirror detector-space transform:
+    # 1) subtract center_z from Z
+    # 2) rotate XY, then XZ, then YZ
+    # 3) keep center_x/center_y as XY center reference in transformed frame
+    z_adj = z - float(calib["center_z"])
+
+    rxy = math.radians(float(calib["rotate_xy"]) / 100.0)
+    x1 = x * math.cos(rxy) - y * math.sin(rxy)
+    y1 = x * math.sin(rxy) + y * math.cos(rxy)
+    z1 = z_adj
+
+    rxz = math.radians(float(calib["rotate_xz"]) / 100.0)
+    x2 = x1 * math.cos(rxz) - z1 * math.sin(rxz)
+    z2 = x1 * math.sin(rxz) + z1 * math.cos(rxz)
+    y2 = y1
+
+    ryz = math.radians(float(calib["rotate_yz"]) / 100.0)
+    y3 = y2 * math.cos(ryz) - z2 * math.sin(ryz)
+    z3 = y2 * math.sin(ryz) + z2 * math.cos(ryz)
+    return x2, y3, z3
+
+
+def transform_mag_points_for_detector(arr: np.ndarray, calib: dict[str, int]) -> np.ndarray:
+    if arr.size == 0:
+        return arr
+
+    out = arr.astype(float, copy=True)
+    out[:, 2] = out[:, 2] - float(calib["center_z"])
+
+    rxy = math.radians(float(calib["rotate_xy"]) / 100.0)
+    x1 = out[:, 0] * math.cos(rxy) - out[:, 1] * math.sin(rxy)
+    y1 = out[:, 0] * math.sin(rxy) + out[:, 1] * math.cos(rxy)
+    z1 = out[:, 2]
+
+    rxz = math.radians(float(calib["rotate_xz"]) / 100.0)
+    x2 = x1 * math.cos(rxz) - z1 * math.sin(rxz)
+    z2 = x1 * math.sin(rxz) + z1 * math.cos(rxz)
+    y2 = y1
+
+    ryz = math.radians(float(calib["rotate_yz"]) / 100.0)
+    y3 = y2 * math.cos(ryz) - z2 * math.sin(ryz)
+    z3 = y2 * math.sin(ryz) + z2 * math.cos(ryz)
+
+    out[:, 0] = x2
+    out[:, 1] = y3
+    out[:, 2] = z3
+    return out
 
 class CalibApp(Gtk.Application):
     def __init__(self, channel: str, interface: str, device_id: int, timeout: float):
@@ -126,6 +186,11 @@ class CalibApp(Gtk.Application):
                 "can_mask": 0x780,
                 "extended": False,
             }],
+        )
+        self.sim_tx_bus = can.Bus(
+            interface=interface,
+            channel=channel,
+            receive_own_messages=False,
         )
 
         self.running = True
@@ -185,6 +250,8 @@ class CalibApp(Gtk.Application):
             "rotate_yz": 0,
             "keepout_rad": 1000,
             "z_limit": 150,
+            "z_max": 405,
+            "elev_curve": 100,
             "data_radius": 3000,
             "num_sectors": 6,
             "mag_offset_x": 0,
@@ -241,6 +308,10 @@ class CalibApp(Gtk.Application):
         self.env_rh_line = None
 
         self.status_label = None
+        self.chart_state_row = None
+        self.chart_meta_label = None
+        self.local_state_label = None
+        self.fw_state_label = None
         self.preview_label = None
         self.acc_status_label = None
         self.mag_live_label = None
@@ -254,6 +325,16 @@ class CalibApp(Gtk.Application):
         self.event_device_buffer = None
         self.log_buffer = None
         self.device_stats_buffer = None
+        self.sim_event_combo = None
+        self.sim_p0_spin = None
+        self.sim_p1_spin = None
+        self.sim_p2_spin = None
+        self.sim_p3_spin = None
+        self.sim_auto_stamp_check = None
+        self.sim_sector_spin = None
+        self.sim_to_sector_spin = None
+        self.sim_elev_spin = None
+        self.sim_speed_spin = None
 
         self.stream_switches: dict[int, Gtk.Switch] = {}
         self.stream_spins: dict[int, Gtk.SpinButton] = {}
@@ -274,6 +355,9 @@ class CalibApp(Gtk.Application):
         self.known_ids_label = None
 
         self.last_status_text = ""
+        self.last_chart_meta_text = ""
+        self.last_local_state_markup = ""
+        self.last_fw_state_markup = ""
         self.last_preview_label_text = ""
         self.last_event_local_text = ""
         self.last_event_device_text = ""
@@ -327,6 +411,47 @@ class CalibApp(Gtk.Application):
         switcher.set_stack(self.left_stack)
         left.append(switcher)
 
+        self.chart_state_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.chart_state_row.set_margin_top(2)
+        self.chart_state_row.set_margin_bottom(2)
+
+        local_frame = Gtk.Frame(label="LOCAL")
+        local_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        local_box.set_margin_start(8)
+        local_box.set_margin_end(8)
+        local_box.set_margin_top(6)
+        local_box.set_margin_bottom(6)
+        self.local_state_label = Gtk.Label(label="")
+        self.local_state_label.set_use_markup(True)
+        self.local_state_label.set_xalign(0.5)
+        local_box.append(self.local_state_label)
+        local_frame.set_child(local_box)
+        local_frame.set_hexpand(True)
+        self.chart_state_row.append(local_frame)
+
+        fw_frame = Gtk.Frame(label="FW")
+        fw_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        fw_box.set_margin_start(8)
+        fw_box.set_margin_end(8)
+        fw_box.set_margin_top(6)
+        fw_box.set_margin_bottom(6)
+        self.fw_state_label = Gtk.Label(label="")
+        self.fw_state_label.set_use_markup(True)
+        self.fw_state_label.set_xalign(0.5)
+        fw_box.append(self.fw_state_label)
+        fw_frame.set_child(fw_box)
+        fw_frame.set_hexpand(True)
+        self.chart_state_row.append(fw_frame)
+
+        left.append(self.chart_state_row)
+
+        self.chart_meta_label = Gtk.Label(label="")
+        self.chart_meta_label.set_xalign(0)
+        self.chart_meta_label.set_wrap(True)
+        self.chart_meta_label.set_selectable(False)
+        self.chart_meta_label.set_margin_bottom(2)
+        left.append(self.chart_meta_label)
+
         self.left_stack.add_titled(self.build_mag_plot_page(), "mag", "MAG 3D")
         self.left_stack.add_titled(self.build_acc_plot_page(), "acc", "ACC 3D")
         self.left_stack.add_titled(self.build_env_plot_page(), "env", "ENV Charts")
@@ -341,6 +466,7 @@ class CalibApp(Gtk.Application):
         self.configure_dynamic_label(self.preview_label)
         left.append(self.preview_label)
 
+        self.update_chart_info_label()
         return left
 
     def build_mag_plot_page(self) -> Gtk.Widget:
@@ -396,7 +522,12 @@ class CalibApp(Gtk.Application):
         self.mag_center_scatter = self.mag_ax.scatter([], [], [], c="black", s=36, marker="o", depthshade=False)
         self.mag_keep_line, = self.mag_ax.plot([], [], [], "r--", linewidth=1.0)
         self.mag_outer_line, = self.mag_ax.plot([], [], [], color="gray", linestyle=":", linewidth=1.0)
+        self.mag_zmax_line, = self.mag_ax.plot([], [], [], color="#1f77b4", linestyle="-.", linewidth=1.0)
         self.mag_sector_lines = [self.mag_ax.plot([], [], [], "k--", linewidth=0.8)[0] for _ in range(16)]
+        self.mag_sector_labels = [
+            self.mag_ax.text(0.0, 0.0, 0.0, "", fontsize=11, color="#222222", ha="center", va="center")
+            for _ in range(16)
+        ]
         self.mag_info_text = self.mag_ax.text2D(0.02, 0.98, "", transform=self.mag_ax.transAxes, va="top", fontsize=8)
 
     def init_acc_plot_artists(self):
@@ -417,7 +548,6 @@ class CalibApp(Gtk.Application):
         self.env_ax.set_xlabel("Time (s)")
         self.env_ax.set_ylabel("Temp (C)", color="red")
         self.env_ax_rh.set_ylabel("RH (%)", color="blue")
-        self.env_ax.set_title("Environment")
         self.env_temp_line, = self.env_ax.plot([], [], color="red", linewidth=1.5, label="Temp")
         self.env_rh_line, = self.env_ax_rh.plot([], [], color="blue", linewidth=1.5, label="RH")
 
@@ -824,6 +954,113 @@ class CalibApp(Gtk.Application):
         btns.append(b_clear_device)
         box.append(btns)
 
+        sim_frame = Gtk.Frame(label="Manual Event Simulation (CAN Inject)")
+        sim_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        sim_box.set_margin_start(6)
+        sim_box.set_margin_end(6)
+        sim_box.set_margin_top(6)
+        sim_box.set_margin_bottom(6)
+
+        sim_info = Gtk.Label(
+            label=(
+                "Transmit synthetic FRAME_EVENT over CAN with source ID "
+                "(0x580 + active device id), so it is processed like a real device event."
+            ),
+            xalign=0,
+        )
+        sim_info.set_wrap(True)
+        sim_box.append(sim_info)
+
+        def make_spin(vmin: int, vmax: int, value: int, step: int = 1) -> Gtk.SpinButton:
+            sp = Gtk.SpinButton()
+            sp.set_range(vmin, vmax)
+            sp.set_increments(step, max(step, step * 5))
+            sp.set_numeric(True)
+            sp.set_value(float(value))
+            return sp
+
+        row_type = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row_type.append(Gtk.Label(label="Event type", xalign=0))
+        self.sim_event_combo = Gtk.ComboBoxText()
+        for ev_id in EVENT_TYPE_IDS:
+            self.sim_event_combo.append(str(ev_id), f"{ev_id}: {EVENT_NAMES.get(ev_id, ev_id)}")
+        self.sim_event_combo.set_active_id(str(EVENT_TYPE_IDS[0]))
+        row_type.append(self.sim_event_combo)
+        row_type.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+        self.sim_auto_stamp_check = Gtk.CheckButton(label="Auto p3 timestamp")
+        self.sim_auto_stamp_check.set_active(True)
+        row_type.append(self.sim_auto_stamp_check)
+        sim_box.append(row_type)
+
+        p_grid = Gtk.Grid(column_spacing=8, row_spacing=6)
+        self.sim_p0_spin = make_spin(0, 255, 1)
+        self.sim_p1_spin = make_spin(0, 255, 0)
+        self.sim_p2_spin = make_spin(0, 255, 0)
+        self.sim_p3_spin = make_spin(0, 65535, 0)
+        p_grid.attach(Gtk.Label(label="p0", xalign=0), 0, 0, 1, 1)
+        p_grid.attach(self.sim_p0_spin, 1, 0, 1, 1)
+        p_grid.attach(Gtk.Label(label="p1", xalign=0), 2, 0, 1, 1)
+        p_grid.attach(self.sim_p1_spin, 3, 0, 1, 1)
+        p_grid.attach(Gtk.Label(label="p2", xalign=0), 4, 0, 1, 1)
+        p_grid.attach(self.sim_p2_spin, 5, 0, 1, 1)
+        p_grid.attach(Gtk.Label(label="p3", xalign=0), 6, 0, 1, 1)
+        p_grid.attach(self.sim_p3_spin, 7, 0, 1, 1)
+        b_emit_custom = Gtk.Button(label="Emit Custom")
+        b_emit_custom.connect("clicked", self.on_sim_emit_custom)
+        p_grid.attach(b_emit_custom, 8, 0, 1, 1)
+        sim_box.append(p_grid)
+
+        quick_grid = Gtk.Grid(column_spacing=8, row_spacing=6)
+        self.sim_sector_spin = make_spin(1, 16, 1)
+        self.sim_to_sector_spin = make_spin(1, 16, 2)
+        self.sim_elev_spin = make_spin(0, 255, 80)
+        self.sim_speed_spin = make_spin(0, 255, 40)
+
+        quick_grid.attach(Gtk.Label(label="sector", xalign=0), 0, 0, 1, 1)
+        quick_grid.attach(self.sim_sector_spin, 1, 0, 1, 1)
+        quick_grid.attach(Gtk.Label(label="to sector", xalign=0), 2, 0, 1, 1)
+        quick_grid.attach(self.sim_to_sector_spin, 3, 0, 1, 1)
+        quick_grid.attach(Gtk.Label(label="elev", xalign=0), 4, 0, 1, 1)
+        quick_grid.attach(self.sim_elev_spin, 5, 0, 1, 1)
+        quick_grid.attach(Gtk.Label(label="speed", xalign=0), 6, 0, 1, 1)
+        quick_grid.attach(self.sim_speed_spin, 7, 0, 1, 1)
+
+        b_q_activate = Gtk.Button(label="Sector Activate")
+        b_q_activate.connect("clicked", self.on_sim_quick_activate)
+        quick_grid.attach(b_q_activate, 0, 1, 2, 1)
+
+        b_q_change = Gtk.Button(label="Sector Change")
+        b_q_change.connect("clicked", self.on_sim_quick_change)
+        quick_grid.attach(b_q_change, 2, 1, 2, 1)
+
+        b_q_intensity = Gtk.Button(label="Intensity")
+        b_q_intensity.connect("clicked", self.on_sim_quick_intensity)
+        quick_grid.attach(b_q_intensity, 4, 1, 2, 1)
+
+        b_q_deactivate = Gtk.Button(label="Deactivate")
+        b_q_deactivate.connect("clicked", self.on_sim_quick_deactivate)
+        quick_grid.attach(b_q_deactivate, 6, 1, 2, 1)
+
+        b_q_session_start = Gtk.Button(label="Session Start")
+        b_q_session_start.connect("clicked", self.on_sim_quick_session_start)
+        quick_grid.attach(b_q_session_start, 0, 2, 2, 1)
+
+        b_q_session_end = Gtk.Button(label="Session End")
+        b_q_session_end.connect("clicked", self.on_sim_quick_session_end)
+        quick_grid.attach(b_q_session_end, 2, 2, 2, 1)
+
+        b_q_nodata = Gtk.Button(label="No Data")
+        b_q_nodata.connect("clicked", self.on_sim_quick_no_data)
+        quick_grid.attach(b_q_nodata, 4, 2, 2, 1)
+
+        b_q_failure = Gtk.Button(label="Mechanical Failure")
+        b_q_failure.connect("clicked", self.on_sim_quick_failure)
+        quick_grid.attach(b_q_failure, 6, 2, 2, 1)
+
+        sim_box.append(quick_grid)
+        sim_frame.set_child(sim_box)
+        box.append(sim_frame)
+
         return box
 
     def configure_dynamic_label(self, label: Gtk.Label):
@@ -841,6 +1078,10 @@ class CalibApp(Gtk.Application):
             pass
         try:
             self.monitor_bus.shutdown()
+        except Exception:
+            pass
+        try:
+            self.sim_tx_bus.shutdown()
         except Exception:
             pass
         return False
@@ -1025,6 +1266,79 @@ class CalibApp(Gtk.Application):
         self.mag_dirty = True
         self.acc_dirty = True
         self.env_dirty = True
+        self.update_chart_info_label()
+
+    def update_chart_info_label(self):
+        if self.chart_meta_label is None:
+            return
+
+        show_sector_state = self.left_active == "mag"
+        if self.chart_state_row is not None:
+            self.chart_state_row.set_visible(show_sector_state)
+
+        local_markup = (
+            f"<span size='x-large' weight='bold'>SEC {self.latest_sector_local}</span>   "
+            f"<span size='x-large' weight='bold'>ELEV {self.latest_elev_local}</span>"
+        )
+        if self.local_state_label is not None and local_markup != self.last_local_state_markup:
+            self.local_state_label.set_markup(local_markup)
+            self.last_local_state_markup = local_markup
+
+        fw_markup = (
+            f"<span size='x-large' weight='bold'>SEC {self.latest_sector_fw}</span>   "
+            f"<span size='x-large' weight='bold'>ELEV {self.latest_elev_fw}</span>"
+        )
+        if self.fw_state_label is not None and fw_markup != self.last_fw_state_markup:
+            self.fw_state_label.set_markup(fw_markup)
+            self.last_fw_state_markup = fw_markup
+
+        if self.left_active == "mag":
+            src_points = self.mag_frozen_points if self.mag_freeze_first_n else list(self.mag_points)[-self.chart_points_limit:]
+            nth = max(1, self.mag_show_every_n)
+            shown = len(src_points[::nth]) if src_points else 0
+            text = (
+                "MAG 3D detector space | "
+                f"center=({self.calib['center_x']},{self.calib['center_y']},{self.calib['center_z']}) "
+                f"rot=({self.calib['rotate_xy']/100.0:.1f},{self.calib['rotate_xz']/100.0:.1f},{self.calib['rotate_yz']/100.0:.1f})deg | "
+                f"keepout={self.calib['keepout_rad']} z_min={self.calib['z_limit']} z_max={self.calib['z_max']} "
+                f"curve={self.calib['elev_curve']/100.0:.2f} sectors={self.calib['num_sectors']} | "
+                f"every={nth} freeze={'on' if self.mag_freeze_first_n else 'off'} shown={shown} recorded={len(self.mag_points)}"
+            )
+        elif self.left_active == "acc":
+            samples = decimate_points(
+                list(self.acc_points)[-self.chart_points_limit:],
+                min(self.chart_points_limit, MAX_RENDER_ACC_POINTS),
+            )
+            lim = 1200.0
+            if self.last_acc_limits is not None:
+                lim = float(self.last_acc_limits[1])
+            sxy, sxz, syz = compute_plane_slopes_cdeg(
+                self.latest_acc_xyz[0],
+                self.latest_acc_xyz[1],
+                self.latest_acc_xyz[2],
+            )
+            text = (
+                f"ACC 3D | latest=({self.latest_acc_xyz[0]},{self.latest_acc_xyz[1]},{self.latest_acc_xyz[2]})mg | "
+                f"slope={self.latest_acc_slope_cdeg}cdeg "
+                f"xy={sxy} xz={sxz} yz={syz} cdeg | "
+                f"shown={len(samples)} recorded={len(self.acc_points)} axis=+/-{lim:.0f}mg"
+            )
+        else:
+            samples = decimate_points(
+                list(self.env_points)[-self.chart_points_limit:],
+                min(self.chart_points_limit, MAX_RENDER_ENV_POINTS),
+            )
+            span_s = 0.0
+            if len(samples) >= 2:
+                span_s = float(samples[-1][0] - samples[0][0])
+            text = (
+                f"ENV charts | latest T={self.latest_temp_c:.2f}C RH={self.latest_rh_pct:.2f}% valid={self.latest_env_valid} | "
+                f"shown={len(samples)} recorded={len(self.env_points)} window={span_s:.1f}s"
+            )
+
+        if text != self.last_chart_meta_text:
+            self.chart_meta_label.set_label(text)
+            self.last_chart_meta_text = text
 
     def process_rx_queue(self):
         processed = 0
@@ -1094,7 +1408,9 @@ class CalibApp(Gtk.Application):
             if data[0] == 0 and subtype == FRAME_MAG and len(data) >= 8:
                 x = int.from_bytes(data[2:4], "little", signed=True)
                 y = int.from_bytes(data[4:6], "little", signed=True)
-                z = int.from_bytes(data[6:8], "little", signed=True)
+                z_raw = int.from_bytes(data[6:8], "little", signed=True)
+                # Use detector-space Z in GUI so plotted values match event-analysis input.
+                z = -z_raw
                 self.latest_mag_xyz = (x, y, z)
                 self.mag_points.append((x, y, z))
                 st["last_mag"] = now_wall
@@ -1200,6 +1516,7 @@ class CalibApp(Gtk.Application):
     def refresh_status_labels(self):
         mx, my, mz = self.latest_mag_xyz
         ax, ay, az = self.latest_acc_xyz
+        slope_xy, slope_xz, slope_yz = compute_plane_slopes_cdeg(ax, ay, az)
         now = time.time()
 
         counts = ", ".join(f"0x{k:02X}:{v}" for k, v in sorted(self.frame_counts.items()))
@@ -1223,7 +1540,11 @@ class CalibApp(Gtk.Application):
             self.preview_label.set_label(preview_label)
             self.last_preview_label_text = preview_label
 
-        acc_text = f"ACC live: x={ax}mg y={ay}mg z={az}mg slope={self.latest_acc_slope_cdeg} cdeg"
+        acc_text = (
+            f"ACC live: x={ax}mg y={ay}mg z={az}mg "
+            f"slope={self.latest_acc_slope_cdeg} cdeg "
+            f"xy={slope_xy} xz={slope_xz} yz={slope_yz} cdeg"
+        )
         if self.acc_status_label is not None and acc_text != self.last_acc_status_text:
             self.acc_status_label.set_label(acc_text)
             self.last_acc_status_text = acc_text
@@ -1265,6 +1586,7 @@ class CalibApp(Gtk.Application):
         self.update_known_devices_label()
         self.refresh_device_info_label()
         self.refresh_device_stats_view()
+        self.update_chart_info_label()
 
     def draw_mag_plot(self):
         if self.mag_ax is None or self.mag_canvas is None:
@@ -1273,7 +1595,7 @@ class CalibApp(Gtk.Application):
         center = np.array([
             float(self.calib["center_x"]),
             float(self.calib["center_y"]),
-            float(self.calib["center_z"]),
+            0.0,
         ], dtype=float)
 
         if self.mag_freeze_first_n:
@@ -1291,20 +1613,23 @@ class CalibApp(Gtk.Application):
         )
         if samples:
             arr = np.array(samples, dtype=float)
-            self.mag_scatter._offsets3d = (arr[:, 0], arr[:, 1], arr[:, 2])
-            self.mag_scatter.set_array(np.linspace(0.0, 1.0, len(arr)))
+            arr_det = transform_mag_points_for_detector(arr, self.calib)
+            self.mag_scatter._offsets3d = (arr_det[:, 0], arr_det[:, 1], arr_det[:, 2])
+            self.mag_scatter.set_array(np.linspace(0.0, 1.0, len(arr_det)))
         else:
             empty = np.array([], dtype=float)
             self.mag_scatter._offsets3d = (empty, empty, empty)
             self.mag_scatter.set_array(empty)
 
         lx, ly, lz = self.latest_mag_xyz
-        self.mag_last_scatter._offsets3d = ([float(lx)], [float(ly)], [float(lz)])
+        ltx, lty, ltz = transform_mag_point_for_detector(float(lx), float(ly), float(lz), self.calib)
+        self.mag_last_scatter._offsets3d = ([ltx], [lty], [ltz])
         self.mag_center_scatter._offsets3d = ([center[0]], [center[1]], [center[2]])
 
         keepout = float(max(0, self.calib["keepout_rad"]))
         radius = float(max(100.0, self.calib["data_radius"]))
-        z_limit_world = float(self.calib["center_z"] + self.calib["z_limit"])
+        z_limit_world = float(self.calib["z_limit"])
+        z_max_world = float(self.calib["z_max"])
         angles = np.linspace(0.0, 2.0 * np.pi, 90)
 
         keep_x = center[0] + keepout * np.cos(angles)
@@ -1316,6 +1641,8 @@ class CalibApp(Gtk.Application):
         outer_y = center[1] + radius * np.sin(angles)
         outer_z = np.full_like(outer_x, z_limit_world)
         self.mag_outer_line.set_data_3d(outer_x, outer_y, outer_z)
+        zmax_z = np.full_like(outer_x, z_max_world)
+        self.mag_zmax_line.set_data_3d(outer_x, outer_y, zmax_z)
 
         num_sectors = max(1, min(16, int(self.calib.get("num_sectors", 6))))
         for idx, line in enumerate(self.mag_sector_lines):
@@ -1327,31 +1654,42 @@ class CalibApp(Gtk.Application):
                 line.set_data_3d([center[0], x2], [center[1], y2], [z_limit_world, z_limit_world])
             else:
                 line.set_data_3d([], [], [])
+        for idx, txt in enumerate(self.mag_sector_labels):
+            if idx < num_sectors:
+                # Place sector numbers on z_min plane, centered within each sector slice.
+                mid_deg = 360.0 * ((float(idx) + 0.5) / float(num_sectors))
+                mid_rad = math.radians(mid_deg)
+                label_r = max(40.0, radius * 0.87)
+                lx = center[0] + label_r * math.cos(mid_rad)
+                ly = center[1] + label_r * math.sin(mid_rad)
+                txt.set_position_3d((lx, ly, z_limit_world), zdir=None)
+                txt.set_text(str(idx + 1))
+                txt.set_visible(True)
+            else:
+                txt.set_text("")
+                txt.set_visible(False)
 
         lim = radius + 200.0
-        mag_limits = (center[0] - lim, center[0] + lim, center[1] - lim, center[1] + lim, center[2] - lim, center[2] + lim)
+        z_center = (z_limit_world + z_max_world) * 0.5
+        mag_limits = (
+            center[0] - lim,
+            center[0] + lim,
+            center[1] - lim,
+            center[1] + lim,
+            z_center - lim,
+            z_center + lim,
+        )
         if self.last_mag_limits != mag_limits:
             self.mag_ax.set_xlim(mag_limits[0], mag_limits[1])
             self.mag_ax.set_ylim(mag_limits[2], mag_limits[3])
             self.mag_ax.set_zlim(mag_limits[4], mag_limits[5])
             self.last_mag_limits = mag_limits
 
-        title = (
-            f"MAG 3D | local sec={self.latest_sector_local} elev={self.latest_elev_local} "
-            f"| fw sec={self.latest_sector_fw} elev={self.latest_elev_fw} "
-            f"| sectors={num_sectors} "
-            f"| every={nth} freeze={'on' if self.mag_freeze_first_n else 'off'} "
-            f"| shown={len(samples)} recorded={len(self.mag_points)}"
-        )
-        if title != self.last_mag_title_text:
-            self.mag_ax.set_title(title)
-            self.last_mag_title_text = title
+        if self.last_mag_title_text:
+            self.mag_ax.set_title("")
+            self.last_mag_title_text = ""
 
-        self.mag_info_text.set_text(
-            f"center=({self.calib['center_x']},{self.calib['center_y']},{self.calib['center_z']})\n"
-            f"rot=({self.calib['rotate_xy']/100.0:.1f},{self.calib['rotate_xz']/100.0:.1f},{self.calib['rotate_yz']/100.0:.1f}) deg\n"
-            f"keepout={self.calib['keepout_rad']} z_limit={self.calib['z_limit']} data_radius={self.calib['data_radius']}"
-        )
+        self.mag_info_text.set_text("")
         self.mag_canvas.draw_idle()
 
     def draw_acc_plot(self):
@@ -1384,10 +1722,9 @@ class CalibApp(Gtk.Application):
             self.acc_ax.set_zlim(acc_limits[4], acc_limits[5])
             self.last_acc_limits = acc_limits
 
-        acc_title = f"ACC 3D | slope={self.latest_acc_slope_cdeg} cdeg"
-        if acc_title != self.last_acc_title_text:
-            self.acc_ax.set_title(acc_title)
-            self.last_acc_title_text = acc_title
+        if self.last_acc_title_text:
+            self.acc_ax.set_title("")
+            self.last_acc_title_text = ""
         self.acc_canvas.draw_idle()
 
     def draw_env_plot(self):
@@ -1407,9 +1744,9 @@ class CalibApp(Gtk.Application):
                 self.env_ax.set_ylim(env_limits[2], env_limits[3])
                 self.env_ax_rh.set_ylim(env_limits[4], env_limits[5])
                 self.last_env_limits = env_limits
-            if self.last_env_title_text != "Environment (no data)":
-                self.env_ax.set_title("Environment (no data)")
-                self.last_env_title_text = "Environment (no data)"
+            if self.last_env_title_text:
+                self.env_ax.set_title("")
+                self.last_env_title_text = ""
             self.env_canvas.draw_idle()
             return
 
@@ -1443,16 +1780,14 @@ class CalibApp(Gtk.Application):
             self.env_ax_rh.set_ylim(env_rh_lim[0], env_rh_lim[1])
             self.last_env_limits = env_limits
 
-        if self.last_env_title_text != "Environment":
-            self.env_ax.set_title("Environment")
-            self.last_env_title_text = "Environment"
+        if self.last_env_title_text:
+            self.env_ax.set_title("")
+            self.last_env_title_text = ""
         self.env_canvas.draw_idle()
 
     def update_preview_events_from_mag(self, x: int, y: int, z: int, now_ts: float):
         self.sync_local_event_detector_config()
-
-        # Firmware runs event detection with inverted Z from MAG sample.
-        events = self.local_event_detector.process_mag_sample(float(x), float(y), float(-z), now_ts)
+        events = self.local_event_detector.process_mag_sample(float(x), float(y), float(z), now_ts)
         sec, elev = self.local_event_detector.get_sector_state()
         self.latest_sector_local = sec
         self.latest_elev_local = elev
@@ -1476,6 +1811,92 @@ class CalibApp(Gtk.Application):
             for evt in events:
                 self.preview_events.appendleft(f"{ts} {evt.to_text()}")
             self.preview_dirty = True
+
+    def sim_stamp_now(self) -> int:
+        return int(time.monotonic() * 1000.0) & 0xFFFF
+
+    def _sim_get_stamp(self) -> int:
+        if self.sim_auto_stamp_check is not None and self.sim_auto_stamp_check.get_active():
+            stamp = self.sim_stamp_now()
+            if self.sim_p3_spin is not None:
+                self.sim_p3_spin.set_value(float(stamp))
+            return stamp
+        if self.sim_p3_spin is None:
+            return self.sim_stamp_now()
+        return int(self.sim_p3_spin.get_value())
+
+    def simulate_local_event(self, ev_id: int, p0: int = 0, p1: int = 0, p2: int = 0, p3: int | None = None):
+        if p3 is None:
+            p3 = self._sim_get_stamp()
+        evt = Event(type=int(ev_id), p0=int(p0) & 0xFF, p1=int(p1) & 0xFF, p2=int(p2) & 0xFF, p3=int(p3) & 0xFFFF)
+        frame = bytes([
+            0x00,
+            FRAME_EVENT,
+            evt.type & 0xFF,
+            evt.p0 & 0xFF,
+            evt.p1 & 0xFF,
+            evt.p2 & 0xFF,
+            evt.p3 & 0xFF,
+            (evt.p3 >> 8) & 0xFF,
+        ])
+        can_id = 0x580 + int(self.active_device_id)
+        msg = can.Message(arbitration_id=can_id, is_extended_id=False, data=frame)
+        try:
+            self.sim_tx_bus.send(msg)
+        except Exception as exc:
+            self.log(f"[ERR] sim-can-send: {exc}")
+            return
+        self.log(
+            f"Simulated device event via CAN id=0x{can_id:03X}: "
+            f"{EVENT_NAMES.get(ev_id, ev_id)} p0={evt.p0} p1={evt.p1} p2={evt.p2} p3={evt.p3}"
+        )
+
+    def on_sim_emit_custom(self, *_args):
+        if self.sim_event_combo is None:
+            return
+        ev_id_raw = self.sim_event_combo.get_active_id()
+        if ev_id_raw is None:
+            return
+        ev_id = int(ev_id_raw)
+        p0 = int(self.sim_p0_spin.get_value()) if self.sim_p0_spin is not None else 0
+        p1 = int(self.sim_p1_spin.get_value()) if self.sim_p1_spin is not None else 0
+        p2 = int(self.sim_p2_spin.get_value()) if self.sim_p2_spin is not None else 0
+        p3 = self._sim_get_stamp()
+        self.simulate_local_event(ev_id, p0, p1, p2, p3)
+
+    def on_sim_quick_activate(self, *_args):
+        sector = int(self.sim_sector_spin.get_value()) if self.sim_sector_spin is not None else 1
+        elev = int(self.sim_elev_spin.get_value()) if self.sim_elev_spin is not None else 80
+        speed = int(self.sim_speed_spin.get_value()) if self.sim_speed_spin is not None else 40
+        self.simulate_local_event(1, sector, elev, speed)
+
+    def on_sim_quick_change(self, *_args):
+        sector = int(self.sim_sector_spin.get_value()) if self.sim_sector_spin is not None else 1
+        to_sector = int(self.sim_to_sector_spin.get_value()) if self.sim_to_sector_spin is not None else 2
+        self.simulate_local_event(2, sector, to_sector, 0)
+
+    def on_sim_quick_intensity(self, *_args):
+        sector = int(self.sim_sector_spin.get_value()) if self.sim_sector_spin is not None else 1
+        elev = int(self.sim_elev_spin.get_value()) if self.sim_elev_spin is not None else 80
+        speed = int(self.sim_speed_spin.get_value()) if self.sim_speed_spin is not None else 40
+        self.simulate_local_event(3, sector, elev, speed)
+
+    def on_sim_quick_deactivate(self, *_args):
+        sector = int(self.sim_sector_spin.get_value()) if self.sim_sector_spin is not None else 1
+        self.simulate_local_event(4, sector, 0, 0)
+
+    def on_sim_quick_session_start(self, *_args):
+        self.simulate_local_event(5, 0, 0, 0)
+
+    def on_sim_quick_session_end(self, *_args):
+        self.simulate_local_event(6, 0, 0, 0)
+
+    def on_sim_quick_no_data(self, *_args):
+        self.simulate_local_event(9, 0, 0, 0)
+
+    def on_sim_quick_failure(self, *_args):
+        sector = int(self.sim_sector_spin.get_value()) if self.sim_sector_spin is not None else 1
+        self.simulate_local_event(8, sector, 0, 0)
 
     def on_chart_points_changed(self, spin: Gtk.SpinButton):
         self.chart_points_limit = int(spin.get_value())

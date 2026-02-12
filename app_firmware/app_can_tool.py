@@ -131,6 +131,8 @@ CAL_FIELD_NAME_TO_ID = {
     "earth_z": 15,
     "earth_valid": 16,
     "num_sectors": 17,
+    "z_max": 18,
+    "elev_curve": 19,
     "all": 0,
 }
 
@@ -442,8 +444,8 @@ class AppCanClient:
         }
 
     def calib_get(self, field_id: int = 0) -> list[dict]:
-        if field_id < 0 or field_id > 17:
-            raise ValueError("calib field-id must be 0..17")
+        if field_id < 0 or field_id > 19:
+            raise ValueError("calib field-id must be 0..19")
 
         self.send_command(bytes([CMD_CALIB_GET, field_id]))
         if field_id == 0:
@@ -471,8 +473,8 @@ class AppCanClient:
         return [out[fid] for fid in sorted(out.keys())]
 
     def calib_set(self, field_id: int, value: int) -> dict:
-        if field_id < 1 or field_id > 17:
-            raise ValueError("calib field-id must be 1..17")
+        if field_id < 1 or field_id > 19:
+            raise ValueError("calib field-id must be 1..19")
         if value < -32768 or value > 32767:
             raise ValueError("calib value must be int16 range")
 
@@ -842,8 +844,8 @@ def calib_field_arg(value: str) -> int:
     if key in CAL_FIELD_NAME_TO_ID:
         return CAL_FIELD_NAME_TO_ID[key]
     iv = int(value, 0)
-    if iv < 0 or iv > 17:
-        raise argparse.ArgumentTypeError("calib field must be all|center_x..num_sectors or 0..17")
+    if iv < 0 or iv > 19:
+        raise argparse.ArgumentTypeError("calib field must be all|center_x..elev_curve or 0..19")
     return iv
 
 
@@ -963,7 +965,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cg.add_argument("--field", default="all", type=calib_field_arg, help="all or field name/id")
 
     p_cs = sub.add_parser("calib-set", help="Set one calibration value")
-    p_cs.add_argument("--field", required=True, type=calib_field_arg, help="field name/id (1..17)")
+    p_cs.add_argument("--field", required=True, type=calib_field_arg, help="field name/id (1..19)")
     p_cs.add_argument("--value", required=True, type=int, help="int16 value")
 
     sub.add_parser("calib-save", help="Save current calibration to flash")
@@ -1097,7 +1099,7 @@ def main() -> int:
 
         if args.cmd == "calib-set":
             if args.field == 0:
-                raise ValueError("calib-set requires a specific field (1..17)")
+                raise ValueError("calib-set requires a specific field (1..19)")
             item = client.calib_set(args.field, args.value)
             print(f"CALIB_SET OK {item['field_name']}({item['field_id']})={item['value']}")
             return 0

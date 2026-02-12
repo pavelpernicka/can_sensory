@@ -68,6 +68,9 @@ static void get_sector(const event_detector_t *det, float x, float y, float z, u
     float dy;
     float distance;
     float azimuth;
+    float normalized;
+    float span;
+    float curve;
     float elevation;
 
     z -= det->center_z;
@@ -91,14 +94,23 @@ static void get_sector(const event_detector_t *det, float x, float y, float z, u
     }
 
     *sector_out = (uint8_t)(azimuth / (360.0f / (float)det->num_sectors)) + 1U;
-    elevation = zr - det->z_limit;
-    if (elevation < 0.0f) {
-        elevation = 0.0f;
+    span = det->z_max - det->z_limit;
+    if (span < 1.0f) {
+        span = 1.0f;
     }
-    if (elevation > 255.0f) {
-        elevation = 255.0f;
+    normalized = (zr - det->z_limit) / span;
+    if (normalized < 0.0f) {
+        normalized = 0.0f;
+    } else if (normalized > 1.0f) {
+        normalized = 1.0f;
     }
-    *elev_out = (uint8_t)elevation;
+
+    curve = det->elev_curve;
+    if (curve < 0.01f) {
+        curve = 0.01f;
+    }
+    elevation = powf(normalized, curve) * 255.0f;
+    *elev_out = clamp_u8((int32_t)(elevation + 0.5f));
 }
 
 void EventDetector_Init(event_detector_t *det, uint32_t now_ms)
@@ -116,6 +128,8 @@ void EventDetector_Init(event_detector_t *det, uint32_t now_ms)
     det->rotate_yz_deg = 0.0f;
     det->keepout_rad = 1000.0f;
     det->z_limit = 150.0f;
+    det->z_max = 405.0f;
+    det->elev_curve = 1.0f;
     det->data_radius = 3000.0f;
     det->num_sectors = EVENT_DETECTOR_DEFAULT_SECTORS;
     det->change_threshold = 3.0f;
@@ -139,6 +153,8 @@ void EventDetector_ApplyCalibration(event_detector_t *det, const app_calibration
     det->rotate_yz_deg = (float)cal->rotate_yz_cdeg / 100.0f;
     det->keepout_rad = (float)cal->keepout_rad_mg;
     det->z_limit = (float)cal->z_limit_mg;
+    det->z_max = (float)cal->z_max_mg;
+    det->elev_curve = (float)cal->elev_curve_centi / 100.0f;
     det->data_radius = (float)cal->data_radius_mg;
     det->num_sectors = sanitize_sector_count(cal->num_sectors);
 }

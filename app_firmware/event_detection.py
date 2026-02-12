@@ -99,6 +99,8 @@ class EventDetectionConfig:
     rotate_yz_deg: float = 0.0
     keepout_rad: float = 1000.0
     z_limit: float = 150.0
+    z_max: float = 405.0
+    elev_curve: float = 1.0
     data_radius: float = 3000.0
     num_sectors: int = EVENT_DEFAULT_SECTORS
     change_threshold: float = 3.0
@@ -107,6 +109,10 @@ class EventDetectionConfig:
 
     def __post_init__(self):
         self.num_sectors = _sanitize_num_sectors(int(self.num_sectors))
+        if self.z_max <= self.z_limit:
+            self.z_max = self.z_limit + 1.0
+        if self.elev_curve <= 0.0:
+            self.elev_curve = 1.0
 
     @classmethod
     def from_calibration(cls, calib: Mapping[str, int]) -> "EventDetectionConfig":
@@ -119,6 +125,8 @@ class EventDetectionConfig:
             rotate_yz_deg=float(calib.get("rotate_yz", 0)) / 100.0,
             keepout_rad=float(calib.get("keepout_rad", 1000)),
             z_limit=float(calib.get("z_limit", 150)),
+            z_max=float(calib.get("z_max", int(calib.get("z_limit", 150)) + 255)),
+            elev_curve=float(calib.get("elev_curve", 100)) / 100.0,
             data_radius=float(calib.get("data_radius", 3000)),
             num_sectors=int(calib.get("num_sectors", EVENT_DEFAULT_SECTORS)),
         )
@@ -181,7 +189,11 @@ class EventDetector:
             azimuth -= 360.0
 
         sector = int(azimuth / (360.0 / float(self.config.num_sectors))) + 1
-        elevation = _clamp_u8(max(0.0, zr - self.config.z_limit))
+        span = max(1.0, self.config.z_max - self.config.z_limit)
+        normalized = (zr - self.config.z_limit) / span
+        normalized = max(0.0, min(1.0, normalized))
+        curve = max(0.01, float(self.config.elev_curve))
+        elevation = _clamp_u8(round((normalized ** curve) * 255.0))
         return sector, elevation
 
     @staticmethod

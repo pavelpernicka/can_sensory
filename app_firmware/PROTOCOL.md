@@ -190,6 +190,9 @@ Calibration field IDs:
 - `14` earth_y
 - `15` earth_z
 - `16` earth_valid
+- `17` num_sectors
+- `18` z_max
+- `19` elev_curve
 
 ### `0x7A` `CALIB_SET`
 

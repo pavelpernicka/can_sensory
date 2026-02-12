@@ -3,10 +3,13 @@
 #include <string.h>
 
 #define APP_CALIB_MAGIC   0x43414C42UL
-#define APP_CALIB_VERSION 3U
+#define APP_CALIB_VERSION 4U
 #define APP_CALIB_MIN_SECTORS 1U
 #define APP_CALIB_MAX_SECTORS 16U
 #define APP_CALIB_DEFAULT_SECTORS 6U
+#define APP_CALIB_ELEV_CURVE_MIN_CENTI 10U
+#define APP_CALIB_ELEV_CURVE_MAX_CENTI 500U
+#define APP_CALIB_ELEV_CURVE_DEFAULT_CENTI 100U
 
 typedef struct {
     uint32_t magic;
@@ -15,6 +18,44 @@ typedef struct {
     app_calibration_t cal;
     uint32_t crc32;
 } app_calib_blob_t;
+
+typedef struct {
+    int16_t center_x_mg;
+    int16_t center_y_mg;
+    int16_t center_z_mg;
+    int16_t rotate_xy_cdeg;
+    int16_t rotate_xz_cdeg;
+    int16_t rotate_yz_cdeg;
+    uint16_t keepout_rad_mg;
+    int16_t z_limit_mg;
+    uint16_t data_radius_mg;
+    int16_t mag_offset_x;
+    int16_t mag_offset_y;
+    int16_t mag_offset_z;
+    int16_t earth_x_mg;
+    int16_t earth_y_mg;
+    int16_t earth_z_mg;
+    uint8_t earth_valid;
+    uint8_t stream_enable_mask;
+    uint16_t interval_mag_ms;
+    uint16_t interval_acc_ms;
+    uint16_t interval_env_ms;
+    uint16_t interval_event_ms;
+    uint8_t num_sectors;
+    uint8_t hmc_range;
+    uint8_t hmc_data_rate;
+    uint8_t hmc_samples;
+    uint8_t hmc_mode;
+    uint16_t reserved0;
+} app_calibration_v3_t;
+
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t size;
+    app_calibration_v3_t cal;
+    uint32_t crc32;
+} app_calib_blob_v3_t;
 
 typedef struct {
     int16_t center_x_mg;
@@ -90,8 +131,26 @@ static app_calibration_t g_cal;
 
 static void calib_sanitize(app_calibration_t *cal)
 {
+    int32_t zmax;
+
     if (cal->num_sectors < APP_CALIB_MIN_SECTORS || cal->num_sectors > APP_CALIB_MAX_SECTORS) {
         cal->num_sectors = APP_CALIB_DEFAULT_SECTORS;
+    }
+    if (cal->elev_curve_centi < APP_CALIB_ELEV_CURVE_MIN_CENTI ||
+        cal->elev_curve_centi > APP_CALIB_ELEV_CURVE_MAX_CENTI) {
+        cal->elev_curve_centi = APP_CALIB_ELEV_CURVE_DEFAULT_CENTI;
+    }
+
+    zmax = (int32_t)cal->z_max_mg;
+    if (zmax <= (int32_t)cal->z_limit_mg) {
+        zmax = (int32_t)cal->z_limit_mg + 255;
+        if (zmax > 32767) {
+            zmax = 32767;
+        }
+        if (zmax <= (int32_t)cal->z_limit_mg) {
+            zmax = (int32_t)cal->z_limit_mg + 1;
+        }
+        cal->z_max_mg = (int16_t)zmax;
     }
 }
 
@@ -119,6 +178,8 @@ static void calib_set_defaults(app_calibration_t *cal)
     cal->rotate_yz_cdeg = 0;
     cal->keepout_rad_mg = 1000U;
     cal->z_limit_mg = 150;
+    cal->z_max_mg = 405;
+    cal->elev_curve_centi = APP_CALIB_ELEV_CURVE_DEFAULT_CENTI;
     cal->data_radius_mg = 3000U;
     cal->mag_offset_x = 0;
     cal->mag_offset_y = 0;
@@ -158,6 +219,7 @@ void Calib_ResetToDefaults(void)
 int Calib_LoadFromFlash(void)
 {
     const app_calib_blob_t *blob = (const app_calib_blob_t *)APP_CALIB_FLASH_ADDR;
+    const app_calib_blob_v3_t *blob_v3 = (const app_calib_blob_v3_t *)APP_CALIB_FLASH_ADDR;
     const app_calib_blob_v2_t *blob_v2 = (const app_calib_blob_v2_t *)APP_CALIB_FLASH_ADDR;
     const app_calib_blob_v1_t *blob_v1 = (const app_calib_blob_v1_t *)APP_CALIB_FLASH_ADDR;
     uint32_t expected_crc;
@@ -180,6 +242,49 @@ int Calib_LoadFromFlash(void)
         return 0;
     }
 
+    if (blob_v3->version == 3U) {
+        if (blob_v3->size != (uint16_t)sizeof(app_calibration_v3_t)) {
+            return 3;
+        }
+
+        expected_crc = crc32_soft((const uint8_t *)&blob_v3->version, (uint32_t)(sizeof(*blob_v3) - 8U));
+        if (expected_crc != blob_v3->crc32) {
+            return 4;
+        }
+
+        g_cal.center_x_mg = blob_v3->cal.center_x_mg;
+        g_cal.center_y_mg = blob_v3->cal.center_y_mg;
+        g_cal.center_z_mg = blob_v3->cal.center_z_mg;
+        g_cal.rotate_xy_cdeg = blob_v3->cal.rotate_xy_cdeg;
+        g_cal.rotate_xz_cdeg = blob_v3->cal.rotate_xz_cdeg;
+        g_cal.rotate_yz_cdeg = blob_v3->cal.rotate_yz_cdeg;
+        g_cal.keepout_rad_mg = blob_v3->cal.keepout_rad_mg;
+        g_cal.z_limit_mg = blob_v3->cal.z_limit_mg;
+        g_cal.z_max_mg = (int16_t)((int32_t)blob_v3->cal.z_limit_mg + 255);
+        g_cal.elev_curve_centi = APP_CALIB_ELEV_CURVE_DEFAULT_CENTI;
+        g_cal.data_radius_mg = blob_v3->cal.data_radius_mg;
+        g_cal.mag_offset_x = blob_v3->cal.mag_offset_x;
+        g_cal.mag_offset_y = blob_v3->cal.mag_offset_y;
+        g_cal.mag_offset_z = blob_v3->cal.mag_offset_z;
+        g_cal.earth_x_mg = blob_v3->cal.earth_x_mg;
+        g_cal.earth_y_mg = blob_v3->cal.earth_y_mg;
+        g_cal.earth_z_mg = blob_v3->cal.earth_z_mg;
+        g_cal.earth_valid = blob_v3->cal.earth_valid;
+        g_cal.stream_enable_mask = blob_v3->cal.stream_enable_mask;
+        g_cal.interval_mag_ms = blob_v3->cal.interval_mag_ms;
+        g_cal.interval_acc_ms = blob_v3->cal.interval_acc_ms;
+        g_cal.interval_env_ms = blob_v3->cal.interval_env_ms;
+        g_cal.interval_event_ms = blob_v3->cal.interval_event_ms;
+        g_cal.num_sectors = blob_v3->cal.num_sectors;
+        g_cal.hmc_range = blob_v3->cal.hmc_range;
+        g_cal.hmc_data_rate = blob_v3->cal.hmc_data_rate;
+        g_cal.hmc_samples = blob_v3->cal.hmc_samples;
+        g_cal.hmc_mode = blob_v3->cal.hmc_mode;
+        g_cal.reserved0 = blob_v3->cal.reserved0;
+        calib_sanitize(&g_cal);
+        return 0;
+    }
+
     if (blob_v2->version == 2U) {
         if (blob_v2->size != (uint16_t)sizeof(app_calibration_v2_t)) {
             return 3;
@@ -198,6 +303,8 @@ int Calib_LoadFromFlash(void)
         g_cal.rotate_yz_cdeg = blob_v2->cal.rotate_yz_cdeg;
         g_cal.keepout_rad_mg = blob_v2->cal.keepout_rad_mg;
         g_cal.z_limit_mg = blob_v2->cal.z_limit_mg;
+        g_cal.z_max_mg = (int16_t)((int32_t)blob_v2->cal.z_limit_mg + 255);
+        g_cal.elev_curve_centi = APP_CALIB_ELEV_CURVE_DEFAULT_CENTI;
         g_cal.data_radius_mg = blob_v2->cal.data_radius_mg;
         g_cal.mag_offset_x = blob_v2->cal.mag_offset_x;
         g_cal.mag_offset_y = blob_v2->cal.mag_offset_y;
@@ -239,6 +346,8 @@ int Calib_LoadFromFlash(void)
         g_cal.rotate_yz_cdeg = blob_v1->cal.rotate_yz_cdeg;
         g_cal.keepout_rad_mg = blob_v1->cal.keepout_rad_mg;
         g_cal.z_limit_mg = blob_v1->cal.z_limit_mg;
+        g_cal.z_max_mg = (int16_t)((int32_t)blob_v1->cal.z_limit_mg + 255);
+        g_cal.elev_curve_centi = APP_CALIB_ELEV_CURVE_DEFAULT_CENTI;
         g_cal.data_radius_mg = blob_v1->cal.data_radius_mg;
         g_cal.mag_offset_x = blob_v1->cal.mag_offset_x;
         g_cal.mag_offset_y = blob_v1->cal.mag_offset_y;
@@ -338,6 +447,15 @@ int Calib_SetField(uint8_t field, int16_t value)
     case APP_CAL_FIELD_Z_LIMIT:
         g_cal.z_limit_mg = value;
         break;
+    case APP_CAL_FIELD_Z_MAX:
+        g_cal.z_max_mg = value;
+        break;
+    case APP_CAL_FIELD_ELEV_CURVE:
+        if (value < (int16_t)APP_CALIB_ELEV_CURVE_MIN_CENTI || value > (int16_t)APP_CALIB_ELEV_CURVE_MAX_CENTI) {
+            return 2;
+        }
+        g_cal.elev_curve_centi = (uint16_t)value;
+        break;
     case APP_CAL_FIELD_DATA_RADIUS:
         if (value < 0) {
             return 2;
@@ -374,6 +492,7 @@ int Calib_SetField(uint8_t field, int16_t value)
     default:
         return 1;
     }
+    calib_sanitize(&g_cal);
     return 0;
 }
 
@@ -407,6 +526,12 @@ int Calib_GetField(uint8_t field, int16_t *value)
         break;
     case APP_CAL_FIELD_Z_LIMIT:
         *value = g_cal.z_limit_mg;
+        break;
+    case APP_CAL_FIELD_Z_MAX:
+        *value = g_cal.z_max_mg;
+        break;
+    case APP_CAL_FIELD_ELEV_CURVE:
+        *value = (int16_t)g_cal.elev_curve_centi;
         break;
     case APP_CAL_FIELD_DATA_RADIUS:
         *value = (int16_t)g_cal.data_radius_mg;
