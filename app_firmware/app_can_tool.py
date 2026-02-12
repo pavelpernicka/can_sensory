@@ -450,27 +450,45 @@ class AppCanClient:
         self.send_command(bytes([CMD_CALIB_GET, field_id]))
         if field_id == 0:
             self.wait_status(expected_extra=0x79)
-            expected = len(CAL_FIELD_ID_TO_NAME)
-        else:
-            self.wait_status(expected_extra=field_id)
-            expected = 1
+            out: dict[int, dict] = {}
+            deadline = time.monotonic() + self.timeout
+            last_calib_s = 0.0
 
-        out: dict[int, dict] = {}
-        deadline = time.monotonic() + self.timeout
-        while len(out) < expected and time.monotonic() < deadline:
-            frame = self.wait_frame(
-                lambda d: len(d) >= 5 and d[0] == 0 and d[1] == FRAME_CALIB_VALUE,
-                timeout=max(0.0, deadline - time.monotonic()),
-            )
-            parsed = parse_calib_value_frame(frame)
-            fid = parsed["field_id"]
-            if field_id == 0 or fid == field_id:
-                out[fid] = parsed
+            while time.monotonic() < deadline:
+                now_s = time.monotonic()
+                if out and (now_s - last_calib_s) > 0.20:
+                    # Calibration reply burst ended.
+                    break
 
-        if len(out) < expected:
-            raise TimeoutError("Timeout waiting for calibration value frame(s)")
+                frame = self._next_frame(timeout=min(0.05, max(0.0, deadline - now_s)))
+                if frame is None:
+                    continue
 
-        return [out[fid] for fid in sorted(out.keys())]
+                # Keep existing error handling semantics for async status frames.
+                if self.is_status_reply(frame):
+                    st = frame[0]
+                    if st != STATUS_OK:
+                        raise RuntimeError(
+                            f"Device error: {STATUS_TEXT.get(st, f'0x{st:02X}')} extra=0x{frame[1]:02X}"
+                        )
+                    continue
+
+                if len(frame) >= 5 and frame[0] == 0 and frame[1] == FRAME_CALIB_VALUE:
+                    parsed = parse_calib_value_frame(frame)
+                    out[parsed["field_id"]] = parsed
+                    last_calib_s = time.monotonic()
+                    if len(out) >= len(CAL_FIELD_ID_TO_NAME):
+                        break
+
+            if not out:
+                raise TimeoutError("Timeout waiting for calibration value frame(s)")
+            return [out[fid] for fid in sorted(out.keys())]
+
+        self.wait_status(expected_extra=field_id)
+        frame = self.wait_frame(
+            lambda d: len(d) >= 5 and d[0] == 0 and d[1] == FRAME_CALIB_VALUE and d[2] == field_id
+        )
+        return [parse_calib_value_frame(frame)]
 
     def calib_set(self, field_id: int, value: int) -> dict:
         if field_id < 1 or field_id > 19:

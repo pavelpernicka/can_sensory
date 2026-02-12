@@ -4,6 +4,7 @@ GTK control and calibration app for app_firmware over CAN.
 """
 
 import argparse
+import json
 import math
 import threading
 import time
@@ -75,6 +76,10 @@ CALIB_FIELDS = [
     ("earth_z", "Earth Z", -32768, 32767, 1),
     ("earth_valid", "Earth Valid", 0, 1, 1),
 ]
+CALIB_FIELD_BOUNDS = {key: (vmin, vmax) for key, _label, vmin, vmax, _step in CALIB_FIELDS}
+STREAM_IDS = (1, 2, 3, 4)
+STREAM_INTERVAL_MIN_MS = 0
+STREAM_INTERVAL_MAX_MS = 60000
 
 STREAM_META = {
     1: "mag",
@@ -880,6 +885,21 @@ class CalibApp(Gtk.Application):
         h2.append(self.auto_apply_check)
         h2.append(b_flush)
         box.append(h2)
+
+        h3 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        b_export_json = Gtk.Button(label="Export JSON")
+        b_export_json.connect("clicked", self.on_export_calib_json)
+        b_import_json = Gtk.Button(label="Import JSON")
+        b_import_json.connect("clicked", lambda *_: self.on_import_calib_json(False, False))
+        b_import_apply = Gtk.Button(label="Import + Apply")
+        b_import_apply.connect("clicked", lambda *_: self.on_import_calib_json(True, False))
+        b_import_apply_save = Gtk.Button(label="Import + Apply + Save")
+        b_import_apply_save.connect("clicked", lambda *_: self.on_import_calib_json(True, True))
+        h3.append(b_export_json)
+        h3.append(b_import_json)
+        h3.append(b_import_apply)
+        h3.append(b_import_apply_save)
+        box.append(h3)
 
         grid = Gtk.Grid(column_spacing=10, row_spacing=8)
         for row, (key, label, vmin, vmax, step) in enumerate(CALIB_FIELDS):
@@ -2003,6 +2023,201 @@ class CalibApp(Gtk.Application):
 
         self.run_async("calib-apply-fields", _run)
 
+    def build_calib_export_payload(self) -> dict:
+        streams = {
+            str(sid): {
+                "enabled": bool(self.stream_cfg[sid]["enabled"]),
+                "interval_ms": int(self.stream_cfg[sid]["interval_ms"]),
+                "name": STREAM_META.get(sid, f"stream_{sid}"),
+            }
+            for sid in STREAM_IDS
+        }
+        hmc = {
+            "range_id": int(self.hmc_cfg["range_id"]),
+            "data_rate_id": int(self.hmc_cfg["data_rate_id"]),
+            "samples_id": int(self.hmc_cfg["samples_id"]),
+            "mode_id": int(self.hmc_cfg["mode_id"]),
+        }
+        return {
+            "format": "magnetomuzika-app-settings",
+            "version": 1,
+            "device_id": int(self.active_device_id),
+            "saved_at_unix": int(time.time()),
+            "calibration": {key: int(self.calib[key]) for key, *_rest in CALIB_FIELDS},
+            "streams": streams,
+            "hmc": hmc,
+        }
+
+    def parse_calib_import_payload(self, data: dict) -> tuple[list[str], list[str]]:
+        src = data.get("calibration") if isinstance(data.get("calibration"), dict) else data
+        if not isinstance(src, dict):
+            raise ValueError("expected JSON object with calibration values")
+
+        updated: list[str] = []
+        clamped: list[str] = []
+        for key, *_rest in CALIB_FIELDS:
+            if key not in src:
+                continue
+            value = int(src[key])
+            vmin, vmax = CALIB_FIELD_BOUNDS[key]
+            clamped_value = max(vmin, min(vmax, value))
+            if clamped_value != value:
+                clamped.append(key)
+            self.calib[key] = int(clamped_value)
+            updated.append(key)
+
+        if not updated:
+            raise ValueError("no known calibration fields in file")
+        return updated, clamped
+
+    def parse_streams_import_payload(self, data: dict) -> tuple[list[int], list[int]]:
+        src = data.get("streams")
+        if not isinstance(src, dict):
+            return [], []
+
+        updated: list[int] = []
+        clamped: list[int] = []
+        for sid in STREAM_IDS:
+            raw = src.get(str(sid))
+            if not isinstance(raw, dict):
+                continue
+            if "enabled" in raw:
+                self.stream_cfg[sid]["enabled"] = bool(raw["enabled"])
+            if "interval_ms" in raw:
+                val = int(raw["interval_ms"])
+                val2 = max(STREAM_INTERVAL_MIN_MS, min(STREAM_INTERVAL_MAX_MS, val))
+                if val2 != val:
+                    clamped.append(sid)
+                self.stream_cfg[sid]["interval_ms"] = int(val2)
+            updated.append(sid)
+        return updated, clamped
+
+    def parse_hmc_import_payload(self, data: dict) -> tuple[list[str], list[str]]:
+        src = data.get("hmc")
+        if not isinstance(src, dict):
+            return [], []
+
+        bounds = {
+            "range_id": (0, 7),
+            "data_rate_id": (0, 6),
+            "samples_id": (0, 3),
+            "mode_id": (0, 2),
+        }
+        updated: list[str] = []
+        clamped: list[str] = []
+        for key, (vmin, vmax) in bounds.items():
+            if key not in src:
+                continue
+            val = int(src[key])
+            val2 = max(vmin, min(vmax, val))
+            if val2 != val:
+                clamped.append(key)
+            self.hmc_cfg[key] = int(val2)
+            updated.append(key)
+        return updated, clamped
+
+    def on_export_calib_json(self, *_args):
+        if self.window is None:
+            return
+        dialog = Gtk.FileChooserNative.new(
+            "Export App Settings JSON",
+            self.window,
+            Gtk.FileChooserAction.SAVE,
+            "Save",
+            "Cancel",
+        )
+        dialog.set_current_name(f"app_settings_dev{int(self.active_device_id)}.json")
+        dialog.connect("response", self.on_export_calib_json_response)
+        dialog.show()
+
+    def on_export_calib_json_response(self, dialog: Gtk.FileChooserNative, response: int):
+        try:
+            if response != Gtk.ResponseType.ACCEPT:
+                return
+            gfile = dialog.get_file()
+            if gfile is None:
+                return
+            path = gfile.get_path()
+            if not path:
+                self.log("[ERR] export calibration: no filesystem path selected")
+                return
+
+            payload = self.build_calib_export_payload()
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=True, indent=2, sort_keys=True)
+                f.write("\n")
+            self.log(f"App settings exported -> {path}")
+        except Exception as exc:
+            self.log(f"[ERR] export settings: {exc}")
+        finally:
+            dialog.destroy()
+
+    def on_import_calib_json(self, apply: bool, save: bool):
+        if self.window is None:
+            return
+        dialog = Gtk.FileChooserNative.new(
+            "Import App Settings JSON",
+            self.window,
+            Gtk.FileChooserAction.OPEN,
+            "Open",
+            "Cancel",
+        )
+        dialog.connect("response", lambda d, r: self.on_import_calib_json_response(d, r, apply, save))
+        dialog.show()
+
+    def on_import_calib_json_response(self, dialog: Gtk.FileChooserNative, response: int, apply: bool, save: bool):
+        try:
+            if response != Gtk.ResponseType.ACCEPT:
+                return
+            gfile = dialog.get_file()
+            if gfile is None:
+                return
+            path = gfile.get_path()
+            if not path:
+                self.log("[ERR] import settings: no filesystem path selected")
+                return
+
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if not isinstance(payload, dict):
+                raise ValueError("root JSON must be an object")
+
+            updated_cal, clamped_cal = self.parse_calib_import_payload(payload)
+            updated_streams, clamped_streams = self.parse_streams_import_payload(payload)
+            updated_hmc, clamped_hmc = self.parse_hmc_import_payload(payload)
+            self.local_event_cfg_dirty = True
+            self.mag_dirty = True
+            self.acc_dirty = True
+            self.env_dirty = True
+            self.set_calib_spin_values()
+            self.update_stream_widgets()
+            self.update_hmc_widgets()
+            self.update_chart_info_label()
+
+            clamp_parts: list[str] = []
+            if clamped_cal:
+                clamp_parts.append("calib=" + ",".join(clamped_cal))
+            if clamped_streams:
+                clamp_parts.append("streams=" + ",".join(str(s) for s in sorted(set(clamped_streams))))
+            if clamped_hmc:
+                clamp_parts.append("hmc=" + ",".join(clamped_hmc))
+            suffix = f" (clamped: {'; '.join(clamp_parts)})" if clamp_parts else ""
+            self.log(
+                "Settings imported "
+                f"(calib={len(updated_cal)} stream_entries={len(updated_streams)} hmc={len(updated_hmc)})"
+                f"{suffix} <- {path}"
+            )
+
+            if apply:
+                self.run_async(
+                    "settings-import-apply",
+                    lambda: self.action_apply_all_flash_settings(save=save),
+                )
+        except Exception as exc:
+            self.log(f"[ERR] import settings: {exc}")
+        finally:
+            dialog.destroy()
+
     def set_calib_spin_values(self):
         self.suppress_spin_events = True
         try:
@@ -2301,15 +2516,49 @@ class CalibApp(Gtk.Application):
     def action_load_runtime_calib(self):
         self.with_lock(self.action_load_runtime_calib_locked, min_timeout=CMD_TIMEOUT_LONG)
 
-    def action_apply_all_calib(self):
+    def action_apply_all_calib(self, save: bool = False):
+        def _apply_locked():
+            for key, fid in CAL_FIELD_NAME_TO_ID.items():
+                if fid == 0:
+                    continue
+                self.client.calib_set(fid, int(self.calib[key]))
+            if save:
+                self.client.calib_save()
+
+        self.with_lock(_apply_locked, min_timeout=CMD_TIMEOUT_LONG)
+        self.log("All calibration fields applied" + (" and saved" if save else ""))
+
+    def action_apply_all_flash_settings(self, save: bool = False):
         def _apply_locked():
             for key, fid in CAL_FIELD_NAME_TO_ID.items():
                 if fid == 0:
                     continue
                 self.client.calib_set(fid, int(self.calib[key]))
 
+            for sid in STREAM_IDS:
+                cfg = self.stream_cfg[sid]
+                self.client.set_stream_enable(sid, bool(cfg["enabled"]))
+                self.client.set_interval(sid, int(cfg["interval_ms"]))
+
+            info = self.client.hmc_set_config(
+                int(self.hmc_cfg["range_id"]),
+                int(self.hmc_cfg["data_rate_id"]),
+                int(self.hmc_cfg["samples_id"]),
+                int(self.hmc_cfg["mode_id"]),
+            )
+            self.hmc_cfg["range_id"] = int(info["range_id"])
+            self.hmc_cfg["data_rate_id"] = int(info["data_rate_id"])
+            self.hmc_cfg["samples_id"] = int(info["samples_id"])
+            self.hmc_cfg["mode_id"] = int(info["mode_id"])
+            self.hmc_cfg["mg_per_digit"] = float(info["mg_per_digit"])
+
+            if save:
+                self.client.calib_save()
+
         self.with_lock(_apply_locked, min_timeout=CMD_TIMEOUT_LONG)
-        self.log("All calibration fields applied")
+        GLib.idle_add(self.update_hmc_widgets)
+        GLib.idle_add(self.update_stream_widgets)
+        self.log("All flash-saved settings applied" + (" and saved" if save else ""))
 
     def action_calib_save(self):
         self.with_lock(self.client.calib_save, min_timeout=CMD_TIMEOUT_LONG)
