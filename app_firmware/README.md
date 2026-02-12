@@ -70,3 +70,64 @@ python3 app_can_tool.py --interface socketcan --channel slcan0 --device-id 1 mon
 # GTK visualizer
 python3 app_calib_gtk.py --interface socketcan --channel slcan0 --device-id 1
 ```
+
+## Multi-Device Player
+
+`app_player.py` is a low-latency FluidSynth player for one or more CAN devices.
+Each device can use:
+- `hardware` events (`FRAME_EVENT` from firmware), or
+- `software` events (computed locally from `FRAME_MAG` using `event_detection.py`).
+- one instrument per CAN device (separate soundfont/program per device).
+
+### Basic usage
+
+```bash
+# Autodiscover devices, hardware events.
+# By default, settings are loaded from app_player_config.json.
+python3 app_player.py --interface socketcan --channel slcan0
+
+# Explicit devices, software events
+python3 app_player.py --interface socketcan --channel slcan0 --device-ids 1,2 --source software
+```
+
+### Optional JSON config
+
+```json
+{
+  "defaults": {
+    "event_source": "hardware",
+    "note_map": [60, 61, 63, 65, 66, 68],
+    "crossfade_ms": 90,
+    "release_ms": 450,
+    "gain": 1.0,
+    "instrument": { "soundfont": "../../sounds/piano.sf2", "bank": 0, "preset": 0 }
+  },
+  "devices": {
+    "1": {
+      "event_source": "software",
+      "note_map": [60, 62, 64, 67, 69, 72],
+      "instrument": { "soundfont": "../../sounds/random.sf2", "bank": 0, "preset": 0 }
+    },
+    "2": {
+      "event_source": "hardware",
+      "note_map": [48, 50, 52, 55, 57, 60],
+      "instrument": { "soundfont": "../../sounds/guitar.sf2", "bank": 0, "preset": 0 }
+    }
+  }
+}
+```
+
+Run with:
+
+```bash
+python3 app_player.py --interface socketcan --channel slcan0
+# or explicit config:
+python3 app_player.py --interface socketcan --channel slcan0 --config app_player_config.json
+```
+
+Or start from the included template:
+
+```bash
+cp app_player_config.example.json app_player_config.json
+python3 app_player.py --interface socketcan --channel slcan0
+```

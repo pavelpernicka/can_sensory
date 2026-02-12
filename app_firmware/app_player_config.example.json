@@ -1,0 +1,22 @@
+{
+  "defaults": {
+    "event_source": "hardware",
+    "note_map": [60, 61, 63, 65, 66, 68],
+    "crossfade_ms": 90,
+    "release_ms": 450,
+    "gain": 1.0,
+    "instrument": { "soundfont": "../../sounds/piano.sf2", "bank": 0, "preset": 0 }
+  },
+  "devices": {
+    "1": {
+      "event_source": "software",
+      "note_map": [60, 62, 64, 67, 69, 72],
+      "instrument": { "soundfont": "../../sounds/random.sf2", "bank": 0, "preset": 0 }
+    },
+    "2": {
+      "event_source": "hardware",
+      "note_map": [48, 50, 52, 55, 57, 60],
+      "instrument": { "soundfont": "../../sounds/guitar.sf2", "bank": 0, "preset": 0 }
+    }
+  }
+}
