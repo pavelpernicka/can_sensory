@@ -456,11 +456,11 @@ class AppCanClient:
 
             while time.monotonic() < deadline:
                 now_s = time.monotonic()
-                if out and (now_s - last_calib_s) > 0.20:
+                if out and (now_s - last_calib_s) > 0.80:
                     # Calibration reply burst ended.
                     break
 
-                frame = self._next_frame(timeout=min(0.05, max(0.0, deadline - now_s)))
+                frame = self._next_frame(timeout_s=min(0.05, max(0.0, deadline - now_s)))
                 if frame is None:
                     continue
 

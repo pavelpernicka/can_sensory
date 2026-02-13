@@ -2504,14 +2504,34 @@ class CalibApp(Gtk.Application):
 
     def action_load_runtime_calib_locked(self):
         vals = self.client.calib_get(0)
+        seen_fids: set[int] = set()
         for item in vals:
-            fid = item["field_id"]
+            fid = int(item["field_id"])
             if fid in CAL_FIELD_ID_TO_NAME:
                 self.calib[CAL_FIELD_ID_TO_NAME[fid]] = int(item["value"])
+                seen_fids.add(fid)
+
+        missing_keys: list[str] = []
+        for key, *_rest in CALIB_FIELDS:
+            fid = int(CAL_FIELD_NAME_TO_ID[key])
+            if fid in seen_fids:
+                continue
+            missing_keys.append(key)
+            single = self.client.calib_get(fid)
+            if single:
+                self.calib[key] = int(single[0]["value"])
+                seen_fids.add(fid)
+
         self.local_event_cfg_dirty = True
         GLib.idle_add(self.set_calib_spin_values)
         self.mag_dirty = True
-        self.log("Runtime calibration loaded")
+        if missing_keys:
+            self.log(
+                f"Runtime calibration loaded (all={len(vals)}; recovered={len(missing_keys)} "
+                f"missing fields: {', '.join(missing_keys)})"
+            )
+        else:
+            self.log(f"Runtime calibration loaded ({len(vals)} fields)")
 
     def action_load_runtime_calib(self):
         self.with_lock(self.action_load_runtime_calib_locked, min_timeout=CMD_TIMEOUT_LONG)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import queue
 import signal
 import threading
@@ -20,6 +21,7 @@ except ModuleNotFoundError:
 from app_can_tool import (
     AppCanClient,
     FRAME_EVENT,
+    FRAME_EVENT_STATE,
     FRAME_MAG,
     EVENT_NAMES,
     discover_devices,
@@ -57,6 +59,20 @@ class DeviceProfile:
     intensity_full_scale: int = 100
     min_level: float = 0.18
     max_level: float = 1.0
+    dynamics_gamma: float = 1.7
+    velocity_min: int = 24
+    velocity_max: int = 127
+    retrigger_level_threshold: float = 0.03
+    keyboard_mode: bool = False
+    keyboard_level: float = 1.0
+    keyboard_velocity: int = 110
+    keyboard_release_ms: int = 120
+    hold_note_in_sector: bool = False
+    hold_zero_grace_ms: int = 120
+    intensity_changes_enabled: bool = True
+    hold_sustain_floor: float = 0.12
+    event_retrigger_debounce_ms: int = 20
+    level_fade_ms: int = 30
     instrument: InstrumentProfile = field(default_factory=lambda: InstrumentProfile(soundfont=""))
 
 
@@ -78,6 +94,8 @@ class DeviceRuntime:
     dropped_frames: int = 0
     current_sector: int = 0
     current_level: float = 0.0
+    last_note_on_s: float = 0.0
+    zero_since_s: float = 0.0
 
 
 @dataclass
@@ -206,10 +224,17 @@ class SynthMixer:
                 instrument=instrument,
             )
 
-    def _play_on_slot(self, slot: VoiceSlot, inst: InstrumentProfile, midi_note: int, vel: int) -> None:
+    def _play_on_slot(
+        self,
+        slot: VoiceSlot,
+        inst: InstrumentProfile,
+        midi_note: int,
+        vel: int,
+        force_retrigger: bool = False,
+    ) -> None:
         sfid = self._get_sfid(inst.soundfont)
         self._select_program(slot, sfid, inst.bank, inst.preset)
-        if slot.note is not None and slot.note != midi_note:
+        if slot.note is not None and (slot.note != midi_note or force_retrigger):
             rc_off = self.fs.noteoff(slot.channel, slot.note)
             self._dbg(f"noteoff ch={slot.channel} note={slot.note} rc={rc_off}")
             slot.note = None
@@ -218,7 +243,17 @@ class SynthMixer:
             self._dbg(f"noteon ch={slot.channel} note={midi_note} vel={vel} rc={rc_on}")
             slot.note = midi_note
 
-    def play_note(self, device_id: int, midi_note: int, level: float, fade_ms: int) -> None:
+    def play_note(
+        self,
+        device_id: int,
+        midi_note: int,
+        level: float,
+        fade_ms: int,
+        vel: int | None = None,
+        retrigger: bool = False,
+        retrigger_floor: float = 0.03,
+        clear_voice: bool = False,
+    ) -> None:
         with self._lock:
             voice = self._voices.get(device_id)
             if voice is None:
@@ -226,15 +261,47 @@ class SynthMixer:
             inst = voice.instrument
             level = self._clampf(level, 0.0, 1.0)
             active = voice.slots[voice.active_slot]
+            if vel is None:
+                vel = int(self._clampf(level, 0.0, 1.0) * 90.0 + 30.0)
+            vel = int(self._clampf(float(vel), 1.0, 127.0))
+            if clear_voice:
+                # Cancel pending release tails when re-entering from zero-zone.
+                for slot in voice.slots:
+                    if slot.note is not None:
+                        rc_off = self.fs.noteoff(slot.channel, slot.note)
+                        self._dbg(f"noteoff ch={slot.channel} note={slot.note} rc={rc_off}")
+                    slot.note = None
+                    slot.gain = 0.0
+                    slot.target_gain = 0.0
+                    slot.fade_ms = max(1, fade_ms)
+                    if slot.cc_last != 0:
+                        self.fs.cc(slot.channel, 7, 0)
+                    slot.cc_last = 0
+                voice.active_slot = 0
+                active = voice.slots[voice.active_slot]
+                self._play_on_slot(active, inst, midi_note, vel, force_retrigger=True)
+                active.gain = 0.0
+                active.target_gain = level
+                active.fade_ms = max(1, fade_ms)
+                return
             if active.note == midi_note:
+                # Only auto-retrigger same note if the voice is effectively silent *and*
+                # not already ramping to an audible target. This prevents retrigger spam
+                # on dense keepalive/event-state updates.
+                floor = max(0.0, float(retrigger_floor))
+                needs_retrigger = retrigger or (
+                    active.gain <= floor and active.target_gain <= floor and level > floor
+                )
+                if needs_retrigger:
+                    self._play_on_slot(active, inst, midi_note, vel, force_retrigger=True)
+                    active.gain = 0.0
                 active.target_gain = level
                 active.fade_ms = max(1, fade_ms)
                 return
 
             inactive_idx = 1 - voice.active_slot
             new_slot = voice.slots[inactive_idx]
-            vel = int(self._clampf(level, 0.0, 1.0) * 90.0 + 30.0)
-            self._play_on_slot(new_slot, inst, midi_note, vel)
+            self._play_on_slot(new_slot, inst, midi_note, vel, force_retrigger=retrigger)
             new_slot.gain = 0.0
             new_slot.target_gain = level
             new_slot.fade_ms = max(1, fade_ms)
@@ -377,6 +444,20 @@ def load_json(path: str | None) -> dict[str, Any]:
         return json.load(f)
 
 
+def cfg_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("1", "true", "yes", "on", "y"):
+            return True
+        if s in ("0", "false", "no", "off", "n"):
+            return False
+    return default
+
+
 def resolve_config_path(path: str) -> Path:
     p = Path(path).expanduser()
     if not p.is_absolute():
@@ -477,6 +558,20 @@ def merge_device_profile(device_id: int, defaults: dict[str, Any], override: dic
         intensity_full_scale=max(1, int(cfg.get("intensity_full_scale", 100))),
         min_level=float(cfg.get("min_level", 0.18)),
         max_level=float(cfg.get("max_level", 1.0)),
+        dynamics_gamma=float(cfg.get("dynamics_gamma", 1.7)),
+        velocity_min=int(cfg.get("velocity_min", 24)),
+        velocity_max=int(cfg.get("velocity_max", 127)),
+        retrigger_level_threshold=float(cfg.get("retrigger_level_threshold", 0.03)),
+        keyboard_mode=cfg_bool(cfg.get("keyboard_mode", False), False),
+        keyboard_level=float(cfg.get("keyboard_level", 1.0)),
+        keyboard_velocity=int(cfg.get("keyboard_velocity", 110)),
+        keyboard_release_ms=int(cfg.get("keyboard_release_ms", 120)),
+        hold_note_in_sector=cfg_bool(cfg.get("hold_note_in_sector", False), False),
+        hold_zero_grace_ms=max(0, int(cfg.get("hold_zero_grace_ms", 120))),
+        intensity_changes_enabled=cfg_bool(cfg.get("intensity_changes_enabled", True), True),
+        hold_sustain_floor=max(0.0, min(1.0, float(cfg.get("hold_sustain_floor", 0.12)))),
+        event_retrigger_debounce_ms=max(0, int(cfg.get("event_retrigger_debounce_ms", 20))),
+        level_fade_ms=max(1, int(cfg.get("level_fade_ms", 30))),
         instrument=instrument,
     )
 
@@ -500,6 +595,12 @@ def parse_frame_mag(data: bytes) -> tuple[int, int, int] | None:
     y = int.from_bytes(data[4:6], "little", signed=True)
     z = int.from_bytes(data[6:8], "little", signed=True)
     return x, y, z
+
+
+def parse_frame_event_state(data: bytes) -> tuple[int, int] | None:
+    if len(data) < 4 or data[0] != 0 or data[1] != FRAME_EVENT_STATE:
+        return None
+    return int(data[2]), int(data[3])
 
 
 def fetch_calibration(channel: str, interface: str, timeout: float, device_id: int) -> dict[str, int] | None:
@@ -533,9 +634,38 @@ def level_from_intensity(profile: DeviceProfile, intensity: int) -> float:
     t = float(max(0, intensity)) / float(max(1, profile.intensity_full_scale))
     if t > 1.0:
         t = 1.0
+    gamma = max(0.25, min(4.0, float(profile.dynamics_gamma)))
+    t = math.pow(t, gamma)
     lo = max(0.0, min(1.0, profile.min_level))
     hi = max(lo, min(1.0, profile.max_level))
     return lo + (hi - lo) * t
+
+
+def velocity_from_intensity(profile: DeviceProfile, intensity: int) -> int:
+    t = float(max(0, intensity)) / float(max(1, profile.intensity_full_scale))
+    if t > 1.0:
+        t = 1.0
+    # Keep low levels controllable while giving stronger attack near max level.
+    shaped = math.pow(t, 0.7)
+    vmin = max(1, min(127, int(profile.velocity_min)))
+    vmax = max(vmin, min(127, int(profile.velocity_max)))
+    return int(round(vmin + (vmax - vmin) * shaped))
+
+
+def velocity_from_level(profile: DeviceProfile, level: float) -> int:
+    lo = max(0.0, min(1.0, profile.min_level))
+    hi = max(lo, min(1.0, profile.max_level))
+    if hi - lo <= 1e-6:
+        t = 0.0 if level <= 0.0 else 1.0
+    else:
+        t = (float(level) - lo) / (hi - lo)
+    t = max(0.0, min(1.0, t))
+    gamma = max(0.25, min(4.0, float(profile.dynamics_gamma)))
+    # Convert curved level back toward source intensity estimate.
+    intensity_t = math.pow(t, 1.0 / gamma)
+    vmin = max(1, min(127, int(profile.velocity_min)))
+    vmax = max(vmin, min(127, int(profile.velocity_max)))
+    return int(round(vmin + (vmax - vmin) * math.pow(intensity_t, 0.7)))
 
 
 def note_for_sector(profile: DeviceProfile, sector: int) -> int:
@@ -543,11 +673,33 @@ def note_for_sector(profile: DeviceProfile, sector: int) -> int:
     return int(profile.note_map[idx % len(profile.note_map)])
 
 
+def event_level(profile: DeviceProfile, intensity: int) -> float:
+    if profile.keyboard_mode:
+        return max(0.0, min(1.0, float(profile.keyboard_level)))
+    return level_from_intensity(profile, intensity)
+
+
+def event_velocity(profile: DeviceProfile, intensity: int, level: float) -> int:
+    if profile.keyboard_mode:
+        return max(1, min(127, int(profile.keyboard_velocity)))
+    # Prefer direct intensity mapping when available.
+    if intensity >= 0:
+        return velocity_from_intensity(profile, intensity)
+    return velocity_from_level(profile, level)
+
+
+def apply_hold_floor(profile: DeviceProfile, sector: int, level: float) -> float:
+    if profile.hold_note_in_sector and sector > 0:
+        return max(float(level), float(profile.hold_sustain_floor))
+    return float(level)
+
+
 def apply_event_to_mixer(runtime: DeviceRuntime, ev: Event, mixer: SynthMixer, print_events: bool,
                          verbose_debug: bool = False) -> None:
     p = runtime.profile
     runtime.events_rx += 1
     runtime.last_event_s = time.monotonic()
+    prev_sector = runtime.current_sector
 
     if print_events:
         print(
@@ -556,30 +708,105 @@ def apply_event_to_mixer(runtime: DeviceRuntime, ev: Event, mixer: SynthMixer, p
         )
 
     if ev.type == EVENT_SECTOR_ACTIVATED:
+        runtime.zero_since_s = 0.0
         runtime.current_sector = ev.p0
-        runtime.current_level = level_from_intensity(p, ev.p1)
-        mixer.play_note(p.device_id, note_for_sector(p, ev.p0), runtime.current_level, p.crossfade_ms)
+        runtime.current_level = apply_hold_floor(p, runtime.current_sector, event_level(p, ev.p1))
+        vel = event_velocity(p, ev.p1, runtime.current_level)
+        retrigger = prev_sector == 0 or runtime.current_level <= p.retrigger_level_threshold
+        mixer.play_note(
+            p.device_id,
+            note_for_sector(p, ev.p0),
+            runtime.current_level,
+            p.crossfade_ms,
+            vel=vel,
+            retrigger=retrigger,
+            retrigger_floor=p.retrigger_level_threshold,
+            clear_voice=(prev_sector == 0),
+        )
         runtime.note_on_actions += 1
+        runtime.last_note_on_s = runtime.last_event_s
     elif ev.type == EVENT_SECTOR_CHANGED:
+        runtime.zero_since_s = 0.0
         runtime.current_sector = ev.p1
         if runtime.current_level <= 0.01:
-            runtime.current_level = level_from_intensity(p, 60)
-        mixer.play_note(p.device_id, note_for_sector(p, ev.p1), runtime.current_level, p.crossfade_ms)
+            runtime.current_level = apply_hold_floor(p, runtime.current_sector, event_level(p, 60))
+        retrigger = prev_sector == 0
+        mixer.play_note(
+            p.device_id,
+            note_for_sector(p, ev.p1),
+            runtime.current_level,
+            p.crossfade_ms,
+            vel=event_velocity(p, -1, runtime.current_level),
+            retrigger=retrigger,
+            retrigger_floor=p.retrigger_level_threshold,
+            clear_voice=(prev_sector == 0),
+        )
         runtime.note_on_actions += 1
+        runtime.last_note_on_s = runtime.last_event_s
     elif ev.type == EVENT_PASSING_SECTOR_CHANGE:
+        runtime.zero_since_s = 0.0
         runtime.current_sector = ev.p0
         if runtime.current_level <= 0.01:
-            runtime.current_level = level_from_intensity(p, 60)
-        mixer.play_note(p.device_id, note_for_sector(p, ev.p0), runtime.current_level, max(20, p.crossfade_ms // 2))
+            runtime.current_level = apply_hold_floor(p, runtime.current_sector, event_level(p, 60))
+        if p.hold_note_in_sector and runtime.current_sector == prev_sector:
+            # In hold mode, duplicate passing updates for the same sector should not
+            # retrigger the note; just keep level stable/smoothed.
+            mixer.set_level(p.device_id, runtime.current_level, p.level_fade_ms)
+            runtime.level_actions += 1
+            return
+        mixer.play_note(
+            p.device_id,
+            note_for_sector(p, ev.p0),
+            runtime.current_level,
+            max(20, p.crossfade_ms // 2),
+            vel=event_velocity(p, -1, runtime.current_level),
+            retrigger=(prev_sector == 0),
+            retrigger_floor=p.retrigger_level_threshold,
+            clear_voice=(prev_sector == 0),
+        )
         runtime.note_on_actions += 1
+        runtime.last_note_on_s = runtime.last_event_s
     elif ev.type == EVENT_INTENSITY_CHANGE:
-        runtime.current_level = level_from_intensity(p, ev.p1)
-        mixer.set_level(p.device_id, runtime.current_level, 60)
-        runtime.level_actions += 1
+        # Some detector sequences can emit intensity before a dedicated activation.
+        # If this is a 0->sector transition, treat it as a note start.
+        if ev.p0 > 0:
+            runtime.zero_since_s = 0.0
+            runtime.current_sector = ev.p0
+        level_from_ev = event_level(p, ev.p1)
+        if p.intensity_changes_enabled or prev_sector == 0:
+            runtime.current_level = level_from_ev
+        runtime.current_level = apply_hold_floor(p, runtime.current_sector, runtime.current_level)
+        if runtime.current_sector > 0 and prev_sector == 0:
+            mixer.play_note(
+                p.device_id,
+                note_for_sector(p, runtime.current_sector),
+                runtime.current_level,
+                max(20, p.crossfade_ms // 2),
+                vel=event_velocity(p, ev.p1, runtime.current_level),
+                retrigger=True,
+                retrigger_floor=p.retrigger_level_threshold,
+                clear_voice=True,
+            )
+            runtime.note_on_actions += 1
+            runtime.last_note_on_s = runtime.last_event_s
+        elif p.keyboard_mode or not p.intensity_changes_enabled:
+            # In keyboard-mode intensity is ignored after note start.
+            pass
+        else:
+            mixer.set_level(p.device_id, runtime.current_level, p.level_fade_ms)
+            runtime.level_actions += 1
     elif ev.type in (EVENT_SECTION_DEACTIVATED, EVENT_SESSION_ENDED, EVENT_POSSIBLE_MECHANICAL_FAILURE, EVENT_ERROR_NO_DATA):
+        if p.hold_note_in_sector:
+            # In hold mode, stop decisions are driven by EVENT_STATE zero detection with grace.
+            # Ignore detector stop events to prevent unwanted note drops while still in-sector.
+            if verbose_debug:
+                print(f"[dbg apply] dev={p.device_id:02d} ignore-stop event in hold mode")
+            return
         runtime.current_sector = 0
         runtime.current_level = 0.0
-        mixer.stop_device(p.device_id, p.release_ms)
+        runtime.zero_since_s = 0.0
+        release_ms = p.keyboard_release_ms if p.keyboard_mode else p.release_ms
+        mixer.stop_device(p.device_id, release_ms)
         runtime.note_off_actions += 1
     elif verbose_debug:
         print(
@@ -610,13 +837,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--preset", type=int, default=0, help="default MIDI preset/program")
     p.add_argument("--crossfade-ms", type=int, default=90, help="default crossfade time")
     p.add_argument("--release-ms", type=int, default=450, help="default fade-out time")
-    p.add_argument("--tick-ms", type=float, default=5.0, help="audio update tick")
+    p.add_argument("--tick-ms", type=float, default=2.0, help="audio update tick")
     p.add_argument("--timeout", type=float, default=1.2, help="per-command timeout for setup/calibration")
     p.add_argument("--setup-streams", dest="setup_streams", action="store_true", help="set low-latency stream config")
     p.add_argument("--no-setup-streams", dest="setup_streams", action="store_false", help="leave stream config unchanged")
     p.set_defaults(setup_streams=True)
-    p.add_argument("--mag-ms", type=int, default=20, help="mag stream interval for software mode")
-    p.add_argument("--event-ms", type=int, default=20, help="event stream interval for hardware mode")
+    p.add_argument("--mag-ms", type=int, default=10, help="mag stream interval for software mode")
+    p.add_argument("--event-ms", type=int, default=10, help="event stream interval for hardware mode")
     p.add_argument("--stats-interval", type=float, default=2.0, help="periodic stats print interval")
     p.add_argument("--print-events", action="store_true", help="print every incoming/generated event")
     p.add_argument("--verbose-debug", action="store_true", help="verbose runtime debug logs (very chatty)")
@@ -795,7 +1022,7 @@ def run() -> int:
         )
         q: queue.Queue[tuple[int, bytes, float]] = queue.Queue(maxsize=8192)
         listener = CanQueueListener(q, runtimes)
-        notifier = can.Notifier(bus, [listener], timeout=0.02)
+        notifier = can.Notifier(bus, [listener], timeout=0.005)
 
         stop_event = threading.Event()
 
@@ -811,7 +1038,7 @@ def run() -> int:
         while not stop_event.is_set():
             now = time.monotonic()
             try:
-                did, data, _ts = q.get(timeout=0.05)
+                did, data, _ts = q.get(timeout=0.01)
             except queue.Empty:
                 did = -1
                 data = b""
@@ -854,6 +1081,92 @@ def run() -> int:
                                 )
                     else:
                         dbg(f"hw-event-parse-fail dev={did:02d} raw={data.hex()}")
+                elif len(data) >= 2 and data[0] == 0 and data[1] == FRAME_EVENT_STATE:
+                    # Use event-state to detect quick zero-zone transitions that may not emit
+                    # an immediate deactivation event frame.
+                    state = parse_frame_event_state(data)
+                    if state is not None and rt.profile.event_source == "hardware":
+                        sector, elev = state
+                        p = rt.profile
+                        prev_sector = rt.current_sector
+                        now_s = time.monotonic()
+                        debounce_s = float(max(0, p.event_retrigger_debounce_ms)) / 1000.0
+                        if sector > 0:
+                            level_from_state = event_level(p, elev)
+                            if p.intensity_changes_enabled or prev_sector == 0 or sector != prev_sector:
+                                rt.current_level = level_from_state
+                            rt.current_level = apply_hold_floor(p, sector, rt.current_level)
+                            rt.zero_since_s = 0.0
+
+                            if prev_sector == 0:
+                                # 0->sector: hard retrigger for clean attack.
+                                if (now_s - rt.last_note_on_s) > debounce_s:
+                                    mixer.play_note(
+                                        p.device_id,
+                                        note_for_sector(p, sector),
+                                        rt.current_level,
+                                        max(20, p.crossfade_ms // 2),
+                                        vel=event_velocity(p, elev, rt.current_level),
+                                        retrigger=True,
+                                        retrigger_floor=p.retrigger_level_threshold,
+                                        clear_voice=True,
+                                    )
+                                    rt.note_on_actions += 1
+                                    rt.last_note_on_s = now_s
+                                    dbg(f"event-state dev={did:02d} 0->sec{sector} retrigger")
+                            elif p.hold_note_in_sector and sector != prev_sector:
+                                # In hold mode, state frame drives crossfade on sector changes.
+                                if (now_s - rt.last_note_on_s) > debounce_s:
+                                    mixer.play_note(
+                                        p.device_id,
+                                        note_for_sector(p, sector),
+                                        rt.current_level,
+                                        p.crossfade_ms,
+                                        vel=event_velocity(p, elev, rt.current_level),
+                                        retrigger=False,
+                                        retrigger_floor=p.retrigger_level_threshold,
+                                        clear_voice=False,
+                                    )
+                                    rt.note_on_actions += 1
+                                    rt.last_note_on_s = now_s
+                                    dbg(f"event-state dev={did:02d} sec{prev_sector}->sec{sector} crossfade")
+                            elif (
+                                p.hold_note_in_sector
+                                and sector == prev_sector
+                            ):
+                                # Keepalive: maintain continuous sustain without re-attacks.
+                                mixer.set_level(p.device_id, rt.current_level, p.level_fade_ms)
+                                rt.level_actions += 1
+
+                            rt.current_sector = sector
+                        else:
+                            if prev_sector != 0:
+                                if p.hold_note_in_sector and p.hold_zero_grace_ms > 0:
+                                    if rt.zero_since_s <= 0.0:
+                                        rt.zero_since_s = now_s
+                                    grace_s = float(p.hold_zero_grace_ms) / 1000.0
+                                    if (now_s - rt.zero_since_s) >= grace_s:
+                                        rt.current_sector = 0
+                                        rt.current_level = 0.0
+                                        release_ms = p.keyboard_release_ms if p.keyboard_mode else p.release_ms
+                                        mixer.stop_device(p.device_id, release_ms)
+                                        rt.note_off_actions += 1
+                                        rt.zero_since_s = 0.0
+                                        dbg(f"event-state dev={did:02d} zero-stop after grace")
+                                    else:
+                                        # Keep sustaining previous sector during grace window.
+                                        dbg(f"event-state dev={did:02d} zero-grace hold")
+                                else:
+                                    rt.current_sector = 0
+                                    rt.current_level = 0.0
+                                    release_ms = p.keyboard_release_ms if p.keyboard_mode else p.release_ms
+                                    mixer.stop_device(p.device_id, release_ms)
+                                    rt.note_off_actions += 1
+                                    rt.zero_since_s = 0.0
+                                    dbg(f"event-state dev={did:02d} 0-zone stop")
+                            else:
+                                rt.current_sector = 0
+                                rt.current_level = 0.0
 
             for rt in runtimes.values():
                 if rt.profile.event_source != "software" or rt.detector is None:
