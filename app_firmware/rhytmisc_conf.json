@@ -26,7 +26,8 @@
         "chorus": 106
       },
       "instrument": {
-        "soundfont": "../../sounds/vs2001.sf2",
+        "type": "midi",
+        "midi_port": "14:0",
         "bank": 0,
         "preset": 0
       }

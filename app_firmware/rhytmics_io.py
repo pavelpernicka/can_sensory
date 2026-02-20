@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import queue
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -22,9 +23,18 @@ EVENT_ERROR_NO_DATA = 9
 
 @dataclass
 class Instrument:
-    soundfont: str
+    type: str = "soundfont"
+    soundfont: str = ""
     bank: int = 0
     preset: int = 0
+    midi_port: str | None = None
+    midi_device: str | None = None
+    faust_dsp: str | None = None
+    faust_command: list[str] | None = None
+    faust_midi_port: str | None = None
+    faust_midi_device: str | None = None
+    faust_startup_wait_ms: int = 300
+    faust_audio_device: str | None = None
 
 
 @dataclass
@@ -182,6 +192,18 @@ def resolve_soundfont(path_str: str) -> str:
     return str(p)
 
 
+def _resolve_optional_local_path(path_str: Any) -> str | None:
+    if path_str is None:
+        return None
+    s = str(path_str).strip()
+    if not s:
+        return None
+    p = Path(s).expanduser()
+    if not p.is_absolute():
+        p = (Path(__file__).resolve().parent / p).resolve()
+    return str(p)
+
+
 def _clamp_int(value: Any, lo: int, hi: int, default: int) -> int:
     try:
         iv = int(value)
@@ -253,6 +275,18 @@ def _parse_any_cc(raw: dict[str, Any], keys: list[str]) -> dict[int, int]:
     return out
 
 
+def _parse_command(raw: Any) -> list[str] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, list):
+        out = [str(x).strip() for x in raw if str(x).strip()]
+        return out or None
+    if isinstance(raw, str):
+        parts = shlex.split(raw)
+        return [p for p in parts if p] or None
+    return None
+
+
 def load_device_configs(default_cfg_path: Path, user_cfg_path: Path) -> dict[int, DeviceConfig]:
     merged = deep_merge(load_json(default_cfg_path), load_json(user_cfg_path))
     raw_devices = merged.get("devices", {})
@@ -279,16 +313,82 @@ def load_device_configs(default_cfg_path: Path, user_cfg_path: Path) -> dict[int
         inst_opts: dict[str, Any] = inst_raw if isinstance(inst_raw, dict) else {}
         inst_cc: dict[int, int] = {}
         if isinstance(inst_raw, str):
-            inst = Instrument(soundfont=resolve_soundfont(inst_raw))
-        elif isinstance(inst_raw, dict):
             inst = Instrument(
-                soundfont=resolve_soundfont(str(inst_raw.get("soundfont", "../../sounds/piano.sf2"))),
-                bank=int(inst_raw.get("bank", 0)),
-                preset=int(inst_raw.get("preset", 0)),
+                type="soundfont",
+                soundfont=resolve_soundfont(inst_raw),
             )
+        elif isinstance(inst_raw, dict):
+            inst_type = str(inst_raw.get("type", "soundfont")).strip().lower() or "soundfont"
+            if inst_type == "faust":
+                dsp = _resolve_optional_local_path(inst_raw.get("dsp", inst_raw.get("faust_dsp", None)))
+                cmd = _parse_command(inst_raw.get("command", inst_raw.get("faust_command", None)))
+                if cmd is None and dsp is not None:
+                    cmd = ["faust2alsaconsole", "-midi", dsp]
+                elif cmd is not None and len(cmd) >= 1:
+                    exe = Path(cmd[0]).name.lower()
+                    if exe.startswith("faust2") and ("-midi" not in cmd) and ("--midi" not in cmd):
+                        # Most Faust standalone targets need explicit MIDI enable.
+                        if len(cmd) >= 2:
+                            cmd = [cmd[0], "-midi", *cmd[1:]]
+                        else:
+                            cmd = [cmd[0], "-midi"]
+                inst = Instrument(
+                    type="faust",
+                    soundfont="",
+                    bank=int(inst_raw.get("bank", 0)),
+                    preset=int(inst_raw.get("preset", 0)),
+                    faust_dsp=dsp,
+                    faust_command=cmd,
+                    faust_midi_port=(
+                        str(inst_raw.get("midi_port", inst_raw.get("faust_midi_port", ""))).strip() or None
+                    ),
+                    faust_midi_device=_resolve_optional_local_path(
+                        inst_raw.get("midi_device", inst_raw.get("faust_midi_device", None))
+                    ),
+                    faust_startup_wait_ms=_clamp_int(
+                        inst_raw.get(
+                            "startup_wait_ms",
+                            inst_raw.get("faust_startup_wait_ms", 300),
+                        ),
+                        0,
+                        15000,
+                        300,
+                    ),
+                    faust_audio_device=(
+                        str(inst_raw.get("audio_device", inst_raw.get("faust_audio_device", ""))).strip() or None
+                    ),
+                )
+            elif inst_type == "midi":
+                midi_port = str(
+                    inst_raw.get(
+                        "midi_port",
+                        inst_raw.get("port", inst_raw.get("faust_midi_port", "")),
+                    )
+                ).strip() or None
+                midi_device = _resolve_optional_local_path(
+                    inst_raw.get(
+                        "midi_device",
+                        inst_raw.get("device", inst_raw.get("faust_midi_device", None)),
+                    )
+                )
+                inst = Instrument(
+                    type="midi",
+                    soundfont="",
+                    bank=int(inst_raw.get("bank", 0)),
+                    preset=int(inst_raw.get("preset", 0)),
+                    midi_port=midi_port,
+                    midi_device=midi_device,
+                )
+            else:
+                inst = Instrument(
+                    type="soundfont",
+                    soundfont=resolve_soundfont(str(inst_raw.get("soundfont", "../../sounds/piano.sf2"))),
+                    bank=int(inst_raw.get("bank", 0)),
+                    preset=int(inst_raw.get("preset", 0)),
+                )
             inst_cc = _parse_any_cc(inst_raw, ["midi_cc", "cc", "controls", "soundfont_cc"])
         else:
-            inst = Instrument(soundfont=resolve_soundfont("../../sounds/piano.sf2"))
+            inst = Instrument(type="soundfont", soundfont=resolve_soundfont("../../sounds/piano.sf2"))
 
         dev_cc = _parse_any_cc(raw, ["midi_cc", "cc", "controls", "soundfont_cc"])
         midi_cc = dict(inst_cc)
