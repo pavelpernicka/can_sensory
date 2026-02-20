@@ -1,0 +1,59 @@
+{
+  "global": {
+    "bpm": 120,
+    "channel": "slcan0",
+    "idle_reset_s": 2.0,
+    "ignore_sector_zero": false,
+    "beat_quantize": true
+  },
+  "devices": {
+    "2": {
+      "event_source": "hardware",
+      "exclude_from_beat_quantize": false,
+      "note_map": [60, 61, 63, 65, 66, 68],
+      "note_duration_ms": 420,
+      "fadein_ms": 20,
+      "fadeout_ms": 220,
+      "velocity": 112,
+      "transpose": 0,
+      "controls": {
+        "volume": 118,
+        "expression": 120,
+        "pan": 52,
+        "brightness": 84,
+        "resonance": 66,
+        "reverb": 28,
+        "chorus": 16
+      },
+      "instrument": {
+        "soundfont": "../../sounds/metal.sf2",
+        "bank": 0,
+        "preset": 0
+      }
+    },
+    "3": {
+      "event_source": "hardware",
+      "exclude_from_beat_quantize": false,
+      "note_map": [60, 61, 63, 65, 66, 68],
+      "note_duration_ms": 520,
+      "fadein_ms": 18,
+      "fadeout_ms": 260,
+      "velocity": 108,
+      "transpose": 0,
+      "controls": {
+        "volume": 120,
+        "expression": 122,
+        "pan": 76,
+        "brightness": 80,
+        "resonance": 64,
+        "reverb": 22,
+        "chorus": 10
+      },
+      "instrument": {
+        "soundfont": "../../sounds/piano.sf2",
+        "bank": 0,
+        "preset": 0
+      }
+    }
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "global": {
+    "bpm": 120,
+    "channel": "vcan0",
+    "idle_reset_s": 5.0,
+    "ignore_sector_zero": true,
+    "beat_quantize": false
+  },
+  "devices": {
+    "2": {
+      "event_source": "hardware",
+      "exclude_from_beat_quantize": false,
+      "note_map": [60, 61, 63, 65, 66, 68],
+      "note_duration_ms": 2500,
+      "fadein_ms": 35,
+      "fadeout_ms": 900,
+      "velocity": 127,
+      "transpose": 0,
+      "controls": {
+        "volume": 127,
+        "expression": 120,
+        "pan": 94,
+        "brightness": 92,
+        "resonance": 102,
+        "reverb": 127,
+        "chorus": 106
+      },
+      "instrument": {
+        "soundfont": "../../sounds/vs2001.sf2",
+        "bank": 0,
+        "preset": 0
+      }
+    },
+    "3": {
+      "event_source": "hardware",
+      "exclude_from_beat_quantize": false,
+      "note_map": [60, 61, 63, 65, 66, 68],
+      "note_duration_ms": 3500,
+      "fadein_ms": 25,
+      "fadeout_ms": 960,
+      "velocity": 108,
+      "transpose": 0,
+      "controls": {
+        "volume": 120,
+        "expression": 122,
+        "pan": 74,
+        "brightness": 80,
+        "resonance": 68,
+        "reverb": 24,
+        "chorus": 10
+      },
+      "instrument": {
+        "soundfont": "../../sounds/organ.sf2",
+        "bank": 0,
+        "preset": 0
+      }
+    }
+  }
+}
