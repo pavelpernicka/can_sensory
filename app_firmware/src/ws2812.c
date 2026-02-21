@@ -201,28 +201,6 @@ static void ws_sample_gradient(
     }
 }
 
-static void ws_sector_tint_rgb(uint8_t sector, uint8_t *r, uint8_t *g, uint8_t *b)
-{
-    if (sector == 0U) {
-        *r = 255U;
-        *g = 255U;
-        *b = 255U;
-        return;
-    }
-    if (sector <= 8U) {
-        uint8_t idx = (uint8_t)(sector - 1U);
-        *r = g_ws.sector_colors[idx][0];
-        *g = g_ws.sector_colors[idx][1];
-        *b = g_ws.sector_colors[idx][2];
-        return;
-    }
-    {
-        uint8_t denom = (g_ws.sector_count == 0U) ? 1U : g_ws.sector_count;
-        uint8_t hue = (uint8_t)((((uint16_t)(sector - 1U)) * 255U) / denom);
-        ws_hue_to_rgb(hue, r, g, b);
-    }
-}
-
 static void ws_rgb565_to_rgb888(uint16_t c, uint8_t *r, uint8_t *g, uint8_t *b)
 {
     uint8_t r5 = (uint8_t)((c >> 11) & 0x1FU);
@@ -443,7 +421,13 @@ static void WS2812_RenderGradient(void)
             WS2812_PackPixel(0U, 0U, 0U, &bit_pos);
             continue;
         }
-        ws_sample_gradient((uint8_t)i, n, stop_count, stop_pos, stop_r, stop_g, stop_b, &r, &g, &b);
+        if (n > 0U) {
+            uint16_t off = (uint16_t)(g_ws.anim_step % n);
+            uint8_t sample_i = (uint8_t)(((uint16_t)i + off) % n);
+            ws_sample_gradient(sample_i, n, stop_count, stop_pos, stop_r, stop_g, stop_b, &r, &g, &b);
+        } else {
+            ws_sample_gradient((uint8_t)i, n, stop_count, stop_pos, stop_r, stop_g, stop_b, &r, &g, &b);
+        }
         r = ws_scale_u8(r, g_ws.brightness);
         g = ws_scale_u8(g, g_ws.brightness);
         b = ws_scale_u8(b, g_ws.brightness);
@@ -460,10 +444,6 @@ static void WS2812_UpdateSectorTarget(void)
     uint8_t stop_g[WS2812_MAX_ZONES];
     uint8_t stop_b[WS2812_MAX_ZONES];
     uint8_t stop_count = 0U;
-    uint8_t tint_r = 255U;
-    uint8_t tint_g = 255U;
-    uint8_t tint_b = 255U;
-
     memset(g_ws.sector_tgt_led, 0, sizeof(g_ws.sector_tgt_led));
     g_ws.sector_target = 0U;
 
@@ -472,16 +452,10 @@ static void WS2812_UpdateSectorTarget(void)
     }
 
     stop_count = ws_collect_sorted_stops(n, stop_pos, stop_r, stop_g, stop_b);
-    ws_sector_tint_rgb(g_ws.sector_active, &tint_r, &tint_g, &tint_b);
 
     for (uint16_t led = 0U; led < n; ++led) {
         uint8_t r = 0U, g = 0U, b = 0U;
         ws_sample_gradient((uint8_t)led, n, stop_count, stop_pos, stop_r, stop_g, stop_b, &r, &g, &b);
-        if (g_ws.sector_active != 0U) {
-            r = ws_scale_u8(r, tint_r);
-            g = ws_scale_u8(g, tint_g);
-            b = ws_scale_u8(b, tint_b);
-        }
         g_ws.sector_tgt_led[led][0] = r;
         g_ws.sector_tgt_led[led][1] = g;
         g_ws.sector_tgt_led[led][2] = b;
@@ -615,6 +589,9 @@ void WS2812_SetAnim(uint8_t mode, uint8_t speed)
     }
     g_ws.anim_mode = mode;
     g_ws.anim_speed = speed;
+    if (mode == WS2812_ANIM_SECTOR_FOLLOW) {
+        g_ws.sector_fade_speed = speed;
+    }
     g_ws.anim_step = 0U;
     g_ws.next_anim_ms = HAL_GetTick();
     g_ws.sector_mode_enabled = (mode == WS2812_ANIM_SECTOR_FOLLOW) ? 1U : 0U;
@@ -853,9 +830,6 @@ void WS2812_Service(uint32_t now_ms)
     if (g_ws.anim_mode == WS2812_ANIM_STATIC) {
         return;
     }
-    if (g_ws.anim_mode == WS2812_ANIM_GRADIENT) {
-        return;
-    }
     if ((int32_t)(now_ms - g_ws.next_anim_ms) < 0) {
         return;
     }
@@ -887,6 +861,15 @@ void WS2812_Service(uint32_t now_ms)
         WS2812_RenderWipe();
         break;
         }
+    case WS2812_ANIM_GRADIENT:
+        if (g_ws.anim_speed == 0U) {
+            interval_ms = 200U;
+        } else {
+            interval_ms = ws_map_speed_ms(g_ws.anim_speed, 120U, 8U);
+            g_ws.anim_step = (uint16_t)(g_ws.anim_step + 1U);
+        }
+        WS2812_RenderGradient();
+        break;
     case WS2812_ANIM_SECTOR_FOLLOW: {
         uint8_t step = (uint8_t)(1U + (g_ws.sector_fade_speed / 24U));
         interval_ms = ws_map_speed_ms(g_ws.sector_fade_speed, 40U, 4U);

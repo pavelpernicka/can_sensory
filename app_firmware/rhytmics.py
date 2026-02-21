@@ -51,10 +51,8 @@ class DeviceVoice:
 class LedDeviceState:
     cfg: LedConfig
     simple_mode: bool = False
-    last_sector: int = 0
+    is_playing: bool = False
     current_stops: list[tuple[int, int]] = field(default_factory=list)  # (pos,color565)
-    restore_pending: bool = False
-    restore_due_s: float = 0.0
     last_keepalive_s: float = 0.0
 
 
@@ -156,24 +154,6 @@ class LedCanController:
         return int(r), int(g), int(b)
 
     @staticmethod
-    def _rgb888_to_rgb565(r: int, g: int, b: int) -> int:
-        r5 = (int(max(0, min(255, r))) * 31 + 127) // 255
-        g6 = (int(max(0, min(255, g))) * 63 + 127) // 255
-        b5 = (int(max(0, min(255, b))) * 31 + 127) // 255
-        return int((r5 << 11) | (g6 << 5) | b5)
-
-    @classmethod
-    def _lerp_rgb565(cls, c0: int, c1: int, num: int, den: int) -> int:
-        if den <= 0:
-            return int(c1)
-        r0, g0, b0 = cls._rgb565_to_rgb888(c0)
-        r1, g1, b1 = cls._rgb565_to_rgb888(c1)
-        r = (r0 * (den - num) + r1 * num) // den
-        g = (g0 * (den - num) + g1 * num) // den
-        b = (b0 * (den - num) + b1 * num) // den
-        return cls._rgb888_to_rgb565(r, g, b)
-
-    @staticmethod
     def _stops_to_pairs(stops: list) -> list[tuple[int, int]]:
         out: list[tuple[int, int]] = []
         for s in stops[:32]:
@@ -183,10 +163,10 @@ class LedCanController:
                 continue
         return out
 
-    def _sector_stops(self, state: LedDeviceState, sector: int) -> list[tuple[int, int]]:
+    def _stops_for_state(self, state: LedDeviceState, playing: bool) -> list[tuple[int, int]]:
         cfg = state.cfg
-        if sector > 0 and int(sector) in cfg.sector_gradients:
-            return self._stops_to_pairs(cfg.sector_gradients[int(sector)])
+        if playing and cfg.play_gradient:
+            return self._stops_to_pairs(cfg.play_gradient)
         return self._stops_to_pairs(cfg.gradient)
 
     def _drop_pending_for_device(self, did: int) -> None:
@@ -216,7 +196,7 @@ class LedCanController:
         stops: list[tuple[int, int]],
         clear_all: bool,
         set_state: bool,
-        set_anim: bool,
+        anim_speed: int,
     ) -> None:
         cfg = state.cfg
         retries = int(cfg.send_retries)
@@ -230,11 +210,8 @@ class LedCanController:
             self._queue_cmd(did, self._cmd_set_all(True, cfg.brightness, base_r, base_g, base_b), retries)
 
         if state.simple_mode:
-            mode = int(cfg.base_mode)
-            if mode == 5:
-                mode = 0
-            if set_anim:
-                self._queue_cmd(did, self._cmd_set_anim(mode, cfg.base_speed), retries)
+            # Minimal fallback path for older firmware.
+            self._queue_cmd(did, self._cmd_set_anim(5, anim_speed), retries)
             return
 
         for idx, (pos, color) in enumerate(stops[:32], start=1):
@@ -243,89 +220,37 @@ class LedCanController:
             for idx in range(len(stops) + 1, 33):
                 self._queue_cmd(did, self._cmd_set_zone(idx, 0, 0), retries)
 
-        if set_anim:
-            mode = int(cfg.base_mode)
-            if mode == 5 and not stops:
-                mode = 0
-            self._queue_cmd(did, self._cmd_set_anim(mode, cfg.base_speed), retries)
+        # Sector-follow mode is reused as smooth gradient transition mode.
+        self._queue_cmd(did, self._cmd_set_anim(6, anim_speed), retries)
 
     def apply_base(self, did: int, clear_all: bool) -> None:
+        self.set_playing(did, False, force=clear_all)
+
+    def set_playing(self, did: int, playing: bool, force: bool = False) -> None:
         state = self._states.get(did)
         if state is None:
             return
-        stops = self._sector_stops(state, state.last_sector)
+        want_play = bool(playing)
+        if (not force) and state.is_playing == want_play:
+            return
+
+        target_stops = self._stops_for_state(state, want_play)
+        speed = state.cfg.play_speed if want_play else state.cfg.base_speed
+        self._drop_pending_for_device(did)
         self._queue_apply_stops(
             did,
             state,
-            stops,
-            clear_all=clear_all,
-            set_state=bool(clear_all),
-            set_anim=True,
+            target_stops,
+            clear_all=True,
+            set_state=bool(force),
+            anim_speed=int(speed),
         )
-        state.current_stops = list(stops)
-        state.restore_pending = False
-        state.last_keepalive_s = time.monotonic()
-
-    def trigger_play(self, did: int) -> None:
-        state = self._states.get(did)
-        if state is None:
-            return
-        onp = state.cfg.on_play
-        if not onp.enabled:
-            return
-        self._queue_cmd(did, self._cmd_set_anim(onp.mode, onp.speed), state.cfg.send_retries)
-        dur_s = max(0.0, float(onp.duration_ms) / 1000.0)
-        if dur_s > 0.0:
-            state.restore_due_s = time.monotonic() + dur_s
-            state.restore_pending = True
-
-    def on_sector(self, did: int, sector: int) -> None:
-        state = self._states.get(did)
-        if state is None:
-            return
-        sector = int(max(0, min(255, int(sector))))
-        if state.last_sector == sector:
-            return
-        prev_stops = list(state.current_stops) if state.current_stops else self._sector_stops(state, state.last_sector)
-        target_stops = self._sector_stops(state, sector)
-        state.last_sector = sector
-        self._drop_pending_for_device(did)
-
-        cfg = state.cfg
-        steps = int(max(1, cfg.sector_fade_steps))
-        fade_ms = int(max(0, cfg.sector_fade_ms))
-        if steps <= 1 or fade_ms <= 0:
-            self._queue_apply_stops(
-                did,
-                state,
-                target_stops,
-                clear_all=True,
-                set_state=False,
-                set_anim=True,
-            )
-            state.current_stops = list(target_stops)
-            return
-
-        n = max(1, len(prev_stops), len(target_stops))
-        prev_pad = list(prev_stops) + [(0, 0)] * max(0, n - len(prev_stops))
-        tgt_pad = list(target_stops) + [(0, 0)] * max(0, n - len(target_stops))
-        for step in range(1, steps + 1):
-            inter: list[tuple[int, int]] = []
-            for i in range(n):
-                p0, c0 = prev_pad[i]
-                p1, c1 = tgt_pad[i]
-                pos = int((p0 * (steps - step) + p1 * step) / steps)
-                col = self._lerp_rgb565(c0, c1, step, steps)
-                inter.append((pos, col))
-            self._queue_apply_stops(
-                did,
-                state,
-                inter,
-                clear_all=(step == steps),
-                set_state=False,
-                set_anim=(step == steps),
-            )
+        state.is_playing = want_play
         state.current_stops = list(target_stops)
+        state.last_keepalive_s = time.monotonic()
+        if self.debug:
+            mode = "playing" if want_play else "idle"
+            print(f"[dbg led] dev={did:02d} -> {mode} gradient speed={int(speed)}")
 
     def _service_timers(self) -> None:
         if not self._states:
@@ -333,12 +258,10 @@ class LedCanController:
         now_s = time.monotonic()
         for did, state in self._states.items():
             cfg = state.cfg
-            if state.restore_pending and now_s >= state.restore_due_s:
-                self.apply_base(did, clear_all=False)
             if cfg.keepalive_ms > 0:
                 period_s = float(cfg.keepalive_ms) / 1000.0
                 if period_s > 0.0 and (now_s - state.last_keepalive_s) >= period_s:
-                    self.apply_base(did, clear_all=False)
+                    self.set_playing(did, state.is_playing, force=True)
 
     def _worker(self) -> None:
         while not self._stop.is_set():
@@ -376,7 +299,6 @@ def apply_led_profile_verified(
     retries = max(0, int(led.send_retries))
     delay_s = float(max(0, int(led.command_spacing_ms))) / 1000.0
     stops = list(led.gradient[:32])
-    mode = int(led.base_mode if stops else 0)
     strip_len = led.strip_len if led.strip_len is not None else None
 
     for attempt in range(retries + 1):
@@ -412,11 +334,11 @@ def apply_led_profile_verified(
                 client.ws_set_sector_zone(idx, 0, 0, readback=False)
                 if delay_s > 0.0:
                     time.sleep(delay_s)
-            client.ws_set_anim(mode, int(led.base_speed))
+            client.ws_set_anim(6, int(led.base_speed))
             if debug:
                 print(
                     f"[dbg led] verified apply ok dev={device_id:02d} len={strip_len} "
-                    f"stops={len(stops)} mode={mode}/{int(led.base_speed)}"
+                    f"stops={len(stops)} mode=6/{int(led.base_speed)}"
                 )
             return True
         except Exception as exc:
@@ -1121,6 +1043,10 @@ class Mixer:
     def any_active_notes(self) -> bool:
         return any(v.note_on_counts for v in self._voices.values())
 
+    def device_has_active_notes(self, device_id: int) -> bool:
+        voice = self._voices.get(device_id)
+        return bool(voice and voice.note_on_counts)
+
     def process_timeouts(self, now_s: float | None = None) -> None:
         if now_s is None:
             now_s = time.monotonic()
@@ -1404,8 +1330,6 @@ def run() -> int:
                     force_retrigger=retrig,
                     fade_out_existing=fade_on_change,
                 )
-                if started and led_controller is not None:
-                    led_controller.trigger_play(device_id)
                 if args.debug and (started or stopped):
                     sf = instrument_label(cfg)
                     print(
@@ -1415,6 +1339,8 @@ def run() -> int:
 
             last_sector_seen[device_id] = sector
             last_input_s = now_s
+            if led_controller is not None:
+                led_controller.set_playing(device_id, mixer.device_has_active_notes(device_id))
 
         def apply_beat(now_s: float) -> None:
             nonlocal beat_running, next_beat_s, beat_idx, beat_window_start_s
@@ -1442,8 +1368,6 @@ def run() -> int:
                             fade_out_existing=pending_fade_on_change[did],
                         )
                         pending_retrigger[did] = False
-                        if started and led_controller is not None:
-                            led_controller.trigger_play(did)
 
                     if args.debug and (started or stopped):
                         sf = instrument_label(cfg)
@@ -1455,6 +1379,8 @@ def run() -> int:
                     pending_notes[did].clear()
                     pending_clear[did] = False
                     pending_fade_on_change[did] = False
+                    if led_controller is not None:
+                        led_controller.set_playing(did, mixer.device_has_active_notes(did))
 
                 if args.debug and beat_debug_rows:
                     print(
@@ -1477,9 +1403,6 @@ def run() -> int:
             if cfg is None or cfg.event_source != "hardware":
                 return
 
-            if led_controller is not None:
-                led_controller.on_sector(did, sector)
-
             now_s = time.monotonic()
             if beat_quantize and not cfg.exclude_from_beat_quantize:
                 queue_sector(did, sector, now_s)
@@ -1489,6 +1412,9 @@ def run() -> int:
         while not stop_event.is_set():
             now = time.monotonic()
             mixer.process_timeouts(now)
+            if led_controller is not None:
+                for did in devices.keys():
+                    led_controller.set_playing(int(did), mixer.device_has_active_notes(int(did)))
             if beat_quantize:
                 apply_beat(now)
 
@@ -1509,6 +1435,9 @@ def run() -> int:
 
             now = time.monotonic()
             mixer.process_timeouts(now)
+            if led_controller is not None:
+                for did in devices.keys():
+                    led_controller.set_playing(int(did), mixer.device_has_active_notes(int(did)))
             if beat_quantize:
                 apply_beat(now)
 

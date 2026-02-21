@@ -10,7 +10,14 @@
     "2": {
       "event_source": "hardware",
       "exclude_from_beat_quantize": false,
-      "note_map": [60, 61, 63, 65, 66, 68],
+      "note_map": [
+        60,
+        61,
+        63,
+        65,
+        66,
+        68
+      ],
       "note_duration_ms": 420,
       "fadein_ms": 20,
       "fadeout_ms": 220,
@@ -35,39 +42,60 @@
         "enabled": true,
         "strip_len": 60,
         "brightness": 96,
-        "base_mode": "gradient",
         "base_speed": 0,
-        "sector_fade_ms": 900,
-        "sector_fade_steps": 12,
         "gradient": [
-          { "pos": 1, "color": "#0823FF" },
-          { "pos": 16, "color": "#0080FF" },
-          { "pos": 31, "color": "#00D0FF" },
-          { "pos": 46, "color": "#1040A0" }
+          {
+            "pos": 1,
+            "color": "#0823FF"
+          },
+          {
+            "pos": 16,
+            "color": "#0080FF"
+          },
+          {
+            "pos": 31,
+            "color": "#00D0FF"
+          },
+          {
+            "pos": 46,
+            "color": "#1040A0"
+          }
         ],
-        "sector_gradients": {
-          "1": [{ "pos": 1, "color": "#2A2AFF" }, { "pos": 16, "color": "#009CFF" }, { "pos": 31, "color": "#00E0FF" }, { "pos": 46, "color": "#0060D0" }],
-          "2": [{ "pos": 1, "color": "#00A0FF" }, { "pos": 16, "color": "#00D6FF" }, { "pos": 31, "color": "#00FFD2" }, { "pos": 46, "color": "#0070B0" }],
-          "3": [{ "pos": 1, "color": "#00D8FF" }, { "pos": 16, "color": "#00FFC0" }, { "pos": 31, "color": "#00FF80" }, { "pos": 46, "color": "#009060" }],
-          "4": [{ "pos": 1, "color": "#00FFC0" }, { "pos": 16, "color": "#40FF80" }, { "pos": 31, "color": "#B0FF40" }, { "pos": 46, "color": "#607020" }],
-          "5": [{ "pos": 1, "color": "#FFF060" }, { "pos": 16, "color": "#FFB040" }, { "pos": 31, "color": "#FF7030" }, { "pos": 46, "color": "#A04020" }],
-          "6": [{ "pos": 1, "color": "#FF8040" }, { "pos": 16, "color": "#FF4040" }, { "pos": 31, "color": "#D02070" }, { "pos": 46, "color": "#601060" }]
-        },
-        "on_play": {
-          "enabled": false,
-          "mode": "blink",
-          "speed": 250,
-          "duration_ms": 140
-        },
         "send_retries": 2,
         "command_spacing_ms": 1,
-        "keepalive_ms": 0
+        "keepalive_ms": 0,
+        "play_gradient": [
+          {
+            "pos": 1,
+            "color": "#2A2AFF"
+          },
+          {
+            "pos": 16,
+            "color": "#009CFF"
+          },
+          {
+            "pos": 31,
+            "color": "#00E0FF"
+          },
+          {
+            "pos": 46,
+            "color": "#0060D0"
+          }
+        ],
+        "play_speed": 250
       }
     },
     "3": {
       "event_source": "hardware",
       "exclude_from_beat_quantize": false,
-      "note_map": [60, 61, 63, 65, 66, 68],
+      "note_map": [
+        60,
+        61,
+        63,
+        65,
+        66,
+        68
+      ],
       "note_duration_ms": 520,
       "fadein_ms": 18,
       "fadeout_ms": 260,
@@ -92,33 +120,47 @@
         "enabled": true,
         "strip_len": 60,
         "brightness": 90,
-        "base_mode": "gradient",
         "base_speed": 0,
-        "sector_fade_ms": 900,
-        "sector_fade_steps": 12,
         "gradient": [
-          { "pos": 1, "color": "#FF0808" },
-          { "pos": 16, "color": "#FF8000" },
-          { "pos": 31, "color": "#FFE000" },
-          { "pos": 46, "color": "#802000" }
+          {
+            "pos": 1,
+            "color": "#FF0808"
+          },
+          {
+            "pos": 16,
+            "color": "#FF8000"
+          },
+          {
+            "pos": 31,
+            "color": "#FFE000"
+          },
+          {
+            "pos": 46,
+            "color": "#802000"
+          }
         ],
-        "sector_gradients": {
-          "1": [{ "pos": 1, "color": "#C020FF" }, { "pos": 16, "color": "#9020FF" }, { "pos": 31, "color": "#6040FF" }, { "pos": 46, "color": "#301080" }],
-          "2": [{ "pos": 1, "color": "#7A30FF" }, { "pos": 16, "color": "#5050FF" }, { "pos": 31, "color": "#2070FF" }, { "pos": 46, "color": "#102870" }],
-          "3": [{ "pos": 1, "color": "#3050FF" }, { "pos": 16, "color": "#2080FF" }, { "pos": 31, "color": "#20B0FF" }, { "pos": 46, "color": "#104060" }],
-          "4": [{ "pos": 1, "color": "#2080FF" }, { "pos": 16, "color": "#20C0F0" }, { "pos": 31, "color": "#20FFB0" }, { "pos": 46, "color": "#106050" }],
-          "5": [{ "pos": 1, "color": "#20D090" }, { "pos": 16, "color": "#50F050" }, { "pos": 31, "color": "#A0FF30" }, { "pos": 46, "color": "#406020" }],
-          "6": [{ "pos": 1, "color": "#FFE020" }, { "pos": 16, "color": "#FFA020" }, { "pos": 31, "color": "#FF6020" }, { "pos": 46, "color": "#802020" }]
-        },
-        "on_play": {
-          "enabled": false,
-          "mode": "breathe",
-          "speed": 240,
-          "duration_ms": 170
-        },
         "send_retries": 2,
         "command_spacing_ms": 1,
-        "keepalive_ms": 0
+        "keepalive_ms": 0,
+        "play_gradient": [
+          {
+            "pos": 1,
+            "color": "#C020FF"
+          },
+          {
+            "pos": 16,
+            "color": "#9020FF"
+          },
+          {
+            "pos": 31,
+            "color": "#6040FF"
+          },
+          {
+            "pos": 46,
+            "color": "#301080"
+          }
+        ],
+        "play_speed": 240
       }
     }
   }

@@ -72,25 +72,14 @@ class LedGradientStop:
 
 
 @dataclass
-class LedPlayAnimConfig:
-    enabled: bool = False
-    mode: int = 1
-    speed: int = 220
-    duration_ms: int = 140
-
-
-@dataclass
 class LedConfig:
     enabled: bool = False
     strip_len: int | None = None
     brightness: int = 80
-    base_mode: int = 5
     base_speed: int = 0
     gradient: list[LedGradientStop] = field(default_factory=list)
-    sector_gradients: dict[int, list[LedGradientStop]] = field(default_factory=dict)
-    sector_fade_ms: int = 650
-    sector_fade_steps: int = 10
-    on_play: LedPlayAnimConfig = field(default_factory=LedPlayAnimConfig)
+    play_gradient: list[LedGradientStop] = field(default_factory=list)
+    play_speed: int = 90
     send_retries: int = 1
     command_spacing_ms: int = 1
     keepalive_ms: int = 0
@@ -120,19 +109,6 @@ CC_NAME_TO_NUM: dict[str, int] = {
     "reverb_send": 91,
     "chorus": 93,
     "chorus_send": 93,
-}
-
-
-WS_ANIM_NAME_TO_ID: dict[str, int] = {
-    "static": 0,
-    "blink": 1,
-    "breathe": 2,
-    "rainbow": 3,
-    "wipe": 4,
-    "gradient": 5,
-    "sector-follow": 6,
-    "sector_follow": 6,
-    "sector": 6,
 }
 
 
@@ -387,17 +363,6 @@ def _parse_color_rgb565(raw: Any) -> int | None:
     return None
 
 
-def _parse_anim_mode(raw: Any, default: int) -> int:
-    if isinstance(raw, int):
-        return int(max(0, min(6, raw)))
-    if isinstance(raw, str):
-        s = raw.strip().lower()
-        if s.lstrip("+-").isdigit():
-            return int(max(0, min(6, int(s))))
-        return int(WS_ANIM_NAME_TO_ID.get(s, default))
-    return int(default)
-
-
 def _parse_led_config(raw_led: Any) -> LedConfig | None:
     if not isinstance(raw_led, dict):
         return None
@@ -405,8 +370,13 @@ def _parse_led_config(raw_led: Any) -> LedConfig | None:
     enabled = bool(_opt_bool(raw_led.get("enabled", True)))
     strip_len = _opt_clamp_int(raw_led.get("strip_len", raw_led.get("length", None)), 1, 255)
     brightness = _clamp_int(raw_led.get("brightness", 80), 0, 255, 80)
-    base_mode = _parse_anim_mode(raw_led.get("base_mode", raw_led.get("mode", "gradient")), 5)
     base_speed = _clamp_int(raw_led.get("base_speed", raw_led.get("speed", 0)), 0, 255, 0)
+    play_speed = _clamp_int(
+        raw_led.get("play_speed", raw_led.get("active_speed", raw_led.get("playing_speed", 90))),
+        0,
+        255,
+        90,
+    )
     send_retries = _clamp_int(raw_led.get("send_retries", raw_led.get("retries", 1)), 0, 6, 1)
     command_spacing_ms = _clamp_int(raw_led.get("command_spacing_ms", raw_led.get("spacing_ms", 1)), 0, 30, 1)
     keepalive_ms = _clamp_int(raw_led.get("keepalive_ms", 0), 0, 60000, 0)
@@ -427,9 +397,10 @@ def _parse_led_config(raw_led: Any) -> LedConfig | None:
                 continue
             gradient.append(LedGradientStop(pos=int(pos), color_rgb565=int(color)))
 
-    sector_gradients: dict[int, list[LedGradientStop]] = {}
+    play_gradient: list[LedGradientStop] = []
     sgrad_raw = raw_led.get("sector_gradients", raw_led.get("sector_gradients_map", {}))
     if isinstance(sgrad_raw, dict):
+        best_sector = None
         for skey, sval in sgrad_raw.items():
             try:
                 sector_id = int(skey)
@@ -450,29 +421,40 @@ def _parse_led_config(raw_led: Any) -> LedConfig | None:
                 if pos is None or color is None:
                     continue
                 sstops.append(LedGradientStop(pos=int(pos), color_rgb565=int(color)))
-            sector_gradients[int(sector_id)] = sstops
+            if sstops and sector_id > 0 and (best_sector is None or sector_id < best_sector):
+                best_sector = sector_id
+                play_gradient = sstops
+
+    pgrad_raw = raw_led.get("play_gradient", raw_led.get("active_gradient", []))
+    if isinstance(pgrad_raw, list):
+        pgrad: list[LedGradientStop] = []
+        for idx, item in enumerate(pgrad_raw, start=1):
+            if len(pgrad) >= 32:
+                break
+            if isinstance(item, dict):
+                pos = _opt_clamp_int(item.get("pos", item.get("position", item.get("pos_led", idx))), 0, 255)
+                color = _parse_color_rgb565(item.get("color", item.get("rgb565", None)))
+            else:
+                pos = _opt_clamp_int(idx, 0, 255)
+                color = _parse_color_rgb565(item)
+            if pos is None or color is None:
+                continue
+            pgrad.append(LedGradientStop(pos=int(pos), color_rgb565=int(color)))
+        if pgrad:
+            play_gradient = pgrad
 
     onp_raw = raw_led.get("on_play", raw_led.get("play_anim", {}))
-    if not isinstance(onp_raw, dict):
-        onp_raw = {}
-    on_play = LedPlayAnimConfig(
-        enabled=bool(_opt_bool(onp_raw.get("enabled", True))),
-        mode=_parse_anim_mode(onp_raw.get("mode", "blink"), 1),
-        speed=_clamp_int(onp_raw.get("speed", 220), 0, 255, 220),
-        duration_ms=_clamp_int(onp_raw.get("duration_ms", onp_raw.get("duration", 140)), 0, 10000, 140),
-    )
+    if isinstance(onp_raw, dict):
+        play_speed = _clamp_int(onp_raw.get("speed", play_speed), 0, 255, play_speed)
 
     return LedConfig(
         enabled=enabled,
         strip_len=strip_len,
         brightness=brightness,
-        base_mode=base_mode,
         base_speed=base_speed,
         gradient=gradient,
-        sector_gradients=sector_gradients,
-        sector_fade_ms=_clamp_int(raw_led.get("sector_fade_ms", 650), 0, 10000, 650),
-        sector_fade_steps=_clamp_int(raw_led.get("sector_fade_steps", 10), 1, 64, 10),
-        on_play=on_play,
+        play_gradient=play_gradient,
+        play_speed=play_speed,
         send_retries=send_retries,
         command_spacing_ms=command_spacing_ms,
         keepalive_ms=keepalive_ms,
