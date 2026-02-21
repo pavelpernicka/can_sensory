@@ -33,6 +33,8 @@ static uint32_t g_last_mag_data_ms;
 static uint8_t g_enter_bootloader_req;
 static uint8_t g_led_pulse_active;
 static uint32_t g_led_pulse_deadline_ms;
+static uint8_t g_ws_sector_override_en;
+static uint8_t g_ws_sector_override;
 
 typedef struct {
     uint32_t magic;
@@ -1021,9 +1023,7 @@ static void App_HandleCommand(const uint8_t *data, uint8_t len)
             data[2],
             (uint16_t)data[3] | ((uint16_t)data[4] << 8)
         );
-        WS2812_Apply();
         APP_CAN_SendStatus(APP_STATUS_OK, 0x5D);
-        App_SendWsSectorZone(data[1]);
         break;
 
     case APP_CMD_WS_GET_SECTOR_ZONE:
@@ -1057,6 +1057,26 @@ static void App_HandleCommand(const uint8_t *data, uint8_t len)
     case APP_CMD_WS_GET_LENGTH:
         APP_CAN_SendStatus(APP_STATUS_OK, 0x60);
         App_SendWsLength();
+        break;
+
+    case APP_CMD_WS_SET_ACTIVE_SECTOR:
+        if (len < 2U) {
+            APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x61);
+            break;
+        }
+        if (data[1] == 0U) {
+            uint8_t live_sector = 0U;
+            uint8_t live_elev = 0U;
+            g_ws_sector_override_en = 0U;
+            g_ws_sector_override = 0U;
+            Events_GetSectorState(&live_sector, &live_elev);
+            WS2812_SetActiveSector(live_sector);
+        } else {
+            g_ws_sector_override_en = 1U;
+            g_ws_sector_override = data[1];
+            WS2812_SetActiveSector(g_ws_sector_override);
+        }
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x61);
         break;
 
     case APP_CMD_CALIB_GET:
@@ -1189,14 +1209,20 @@ int main(void)
     g_next_mag_sample_ms = now + APP_MAG_SAMPLE_PERIOD_MS;
     g_next_acc_sample_ms = now + APP_ACC_SAMPLE_PERIOD_MS;
     g_last_mag_data_ms = now;
+    g_ws_sector_override_en = 0U;
+    g_ws_sector_override = 0U;
 
     App_SendStartup();
 
     while (1) {
         now = HAL_GetTick();
         Led_Service(now);
-        Events_GetSectorState(&cur_sector, &cur_elev);
-        WS2812_SetActiveSector(cur_sector);
+        if (g_ws_sector_override_en) {
+            WS2812_SetActiveSector(g_ws_sector_override);
+        } else {
+            Events_GetSectorState(&cur_sector, &cur_elev);
+            WS2812_SetActiveSector(cur_sector);
+        }
         WS2812_Service(now);
 
         while (APP_CAN_TryRecv(rx_data, &rx_len)) {

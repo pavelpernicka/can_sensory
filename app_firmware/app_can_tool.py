@@ -26,6 +26,7 @@ CMD_WS_SET_SECTOR_ZONE = 0x5D
 CMD_WS_GET_SECTOR_ZONE = 0x5E
 CMD_WS_SET_LENGTH = 0x5F
 CMD_WS_GET_LENGTH = 0x60
+CMD_WS_SET_ACTIVE_SECTOR = 0x61
 CMD_HMC_SET_CFG = 0x6E
 CMD_HMC_GET_CFG = 0x6F
 CMD_SET_INTERVAL = 0x70
@@ -616,7 +617,7 @@ class AppCanClient:
         frame = self.wait_frame(lambda d: len(d) >= 7 and d[0] == 0 and d[1] == FRAME_WS_SECTOR_MODE)
         return parse_ws_sector_mode_frame(frame)
 
-    def ws_set_sector_zone(self, idx: int, pos_led: int, color_rgb565: int) -> dict:
+    def ws_set_sector_zone(self, idx: int, pos_led: int, color_rgb565: int, readback: bool = False) -> dict:
         if idx < 1 or idx > 32:
             raise ValueError("zone index must be 1..32")
         if pos_led < 0 or pos_led > 255:
@@ -631,8 +632,14 @@ class AppCanClient:
             (color_rgb565 >> 8) & 0xFF,
         ]))
         self.wait_status(expected_extra=0x5D)
-        frame = self.wait_frame(lambda d: len(d) >= 8 and d[0] == 0 and d[1] == FRAME_WS_SECTOR_ZONE and d[2] == idx)
-        return parse_ws_sector_zone_frame(frame)
+        if readback:
+            frame = self.wait_frame(lambda d: len(d) >= 8 and d[0] == 0 and d[1] == FRAME_WS_SECTOR_ZONE and d[2] == idx)
+            return parse_ws_sector_zone_frame(frame)
+        return {
+            "idx": int(idx),
+            "pos_led": int(pos_led),
+            "color_rgb565": int(color_rgb565),
+        }
 
     def ws_get_sector_zone(self, idx: int = 0) -> list[dict]:
         if idx < 0 or idx > 32:
@@ -678,6 +685,19 @@ class AppCanClient:
         self.wait_status(expected_extra=0x60)
         frame = self.wait_frame(lambda d: len(d) >= 4 and d[0] == 0 and d[1] == FRAME_WS_LENGTH)
         return parse_ws_length_frame(frame)
+
+    def ws_set_active_sector(self, sector: int, readback: bool = False) -> dict:
+        if sector < 0 or sector > 255:
+            raise ValueError("active sector must be 0..255 (0 disables CAN override)")
+        self.send_command(bytes([CMD_WS_SET_ACTIVE_SECTOR, sector & 0xFF]))
+        self.wait_status(expected_extra=0x61)
+        if readback:
+            frame = self.wait_frame(lambda d: len(d) >= 7 and d[0] == 0 and d[1] == FRAME_WS_SECTOR_MODE)
+            return parse_ws_sector_mode_frame(frame)
+        return {
+            "active_sector": int(sector),
+            "override_enabled": int(sector != 0),
+        }
 
     def aht20_read(self) -> dict:
         self.send_command(bytes([CMD_AHT20_READ]))
@@ -1404,6 +1424,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_led.add_argument("--zone-color", type=rgb565_arg, help="zone color RGB565")
     p_led.add_argument("--len", type=byte_arg, help="active LED count (1..max)")
     p_led.add_argument("--len-get", action="store_true", help="Read active/max LED count")
+    p_led.add_argument("--active-sector", type=byte_arg, help="set CAN-driven active sector (0 disables override)")
 
     p_mon = sub.add_parser("monitor", help="Live decode of incoming app frames")
     p_mon.add_argument("--duration", type=float, default=0.0, help="Seconds to monitor (0 = forever)")
@@ -1615,6 +1636,14 @@ def main() -> int:
             if args.len is not None:
                 st = client.ws_set_length(int(args.len))
                 print(f"LED_LENGTH_SET OK len={st['strip_len']} max={st['max_strip_len']}")
+                return 0
+
+            if args.active_sector is not None:
+                st = client.ws_set_active_sector(int(args.active_sector))
+                print(
+                    f"LED_ACTIVE_SECTOR_SET OK active={st['active_sector']} "
+                    f"override={st['override_enabled']}"
+                )
                 return 0
 
             has_sector_mode = (

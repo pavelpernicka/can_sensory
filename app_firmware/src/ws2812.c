@@ -34,6 +34,7 @@ typedef struct {
     ws2812_sector_zone_t zones[WS2812_MAX_ZONES];
     uint8_t sector_cur_led[APP_WS2812_STRIP_LEN][3];
     uint8_t sector_tgt_led[APP_WS2812_STRIP_LEN][3];
+    uint8_t dirty;
 } ws2812_runtime_t;
 
 static ws2812_runtime_t g_ws;
@@ -477,6 +478,7 @@ void WS2812_Init(void)
     g_ws.zones[2].idx = 3U;
     g_ws.zones[2].pos_led = (uint8_t)((2U * APP_WS2812_STRIP_LEN) / 3U);
     g_ws.zones[2].color_rgb565 = 0x001FU; /* blue */
+    g_ws.dirty = 1U;
 
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_SPI1_CLK_ENABLE();
@@ -511,11 +513,13 @@ void WS2812_Init(void)
 void WS2812_SetEnabled(uint8_t enabled)
 {
     g_ws.enabled = enabled ? 1U : 0U;
+    g_ws.dirty = 1U;
 }
 
 void WS2812_SetBrightness(uint8_t brightness)
 {
     g_ws.brightness = brightness;
+    g_ws.dirty = 1U;
 }
 
 void WS2812_SetColor(uint8_t r, uint8_t g, uint8_t b)
@@ -523,6 +527,7 @@ void WS2812_SetColor(uint8_t r, uint8_t g, uint8_t b)
     g_ws.r = r;
     g_ws.g = g;
     g_ws.b = b;
+    g_ws.dirty = 1U;
 }
 
 void WS2812_SetAnim(uint8_t mode, uint8_t speed)
@@ -536,6 +541,7 @@ void WS2812_SetAnim(uint8_t mode, uint8_t speed)
     g_ws.next_anim_ms = HAL_GetTick();
     g_ws.sector_mode_enabled = (mode == WS2812_ANIM_SECTOR_FOLLOW) ? 1U : 0U;
     WS2812_UpdateSectorTarget();
+    g_ws.dirty = 1U;
 }
 
 void WS2812_GetAnim(ws2812_anim_t *anim)
@@ -572,6 +578,7 @@ void WS2812_SetGradient(uint8_t split_idx, uint8_t fade_px, uint16_t c1_rgb565, 
         g_ws.zones[i].pos_led = 0U;
         g_ws.zones[i].color_rgb565 = 0U;
     }
+    g_ws.dirty = 1U;
 }
 
 void WS2812_GetGradient(ws2812_gradient_t *cfg)
@@ -600,6 +607,7 @@ void WS2812_SetSectorMode(uint8_t enabled, uint8_t fade_speed, uint8_t sector_co
     g_ws.anim_mode = g_ws.sector_mode_enabled ? WS2812_ANIM_SECTOR_FOLLOW : WS2812_ANIM_STATIC;
     g_ws.next_anim_ms = HAL_GetTick();
     WS2812_UpdateSectorTarget();
+    g_ws.dirty = 1U;
 }
 
 void WS2812_GetSectorMode(ws2812_sector_mode_t *cfg)
@@ -624,6 +632,7 @@ void WS2812_SetSectorColor(uint8_t idx, uint8_t r, uint8_t g, uint8_t b)
     g_ws.sector_colors[idx - 1U][1] = g;
     g_ws.sector_colors[idx - 1U][2] = b;
     WS2812_UpdateSectorTarget();
+    g_ws.dirty = 1U;
 }
 
 void WS2812_GetSectorColor(uint8_t idx, ws2812_sector_color_t *cfg)
@@ -659,6 +668,7 @@ void WS2812_SetSectorZone(uint8_t idx, uint8_t pos_led, uint16_t color_rgb565)
         z->pos_led = 0U;
         z->color_rgb565 = 0U;
     }
+    g_ws.dirty = 1U;
 }
 
 void WS2812_GetSectorZone(uint8_t idx, ws2812_sector_zone_t *cfg)
@@ -682,6 +692,7 @@ void WS2812_SetActiveSector(uint8_t sector)
     }
     g_ws.sector_active = sector;
     WS2812_UpdateSectorTarget();
+    g_ws.dirty = 1U;
 }
 
 void WS2812_GetState(ws2812_state_t *state)
@@ -708,6 +719,7 @@ void WS2812_SetStripLength(uint8_t strip_len)
     }
     g_ws.strip_len = strip_len;
     WS2812_UpdateSectorTarget();
+    g_ws.dirty = 1U;
 }
 
 void WS2812_GetStripLength(uint8_t *strip_len, uint8_t *max_strip_len)
@@ -742,6 +754,7 @@ void WS2812_Apply(void)
         default:                  WS2812_RenderStatic();  break;
         }
     }
+    g_ws.dirty = 0U;
 }
 
 void WS2812_Service(uint32_t now_ms)
@@ -750,6 +763,9 @@ void WS2812_Service(uint32_t now_ms)
 
     if (!g_spi_ready) {
         return;
+    }
+    if (g_ws.dirty) {
+        WS2812_Apply();
     }
     if (!g_ws.enabled) {
         return;

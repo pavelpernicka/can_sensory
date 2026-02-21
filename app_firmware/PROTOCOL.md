@@ -204,7 +204,6 @@ Payload:
 
 Response:
 - status `OK, extra=0x5D`
-- `WS_SECTOR_ZONE` frame (`subtype=0x4C`) for updated `idx`
 
 ### `0x5E` `WS_GET_SECTOR_ZONE`
 
@@ -236,6 +235,16 @@ Payload:
 Response:
 - status `OK, extra=0x60`
 - `WS_LENGTH` frame (`subtype=0x4D`)
+
+### `0x61` `WS_SET_ACTIVE_SECTOR`
+
+Payload:
+- `[0x61, sector]`
+- `sector=0`: disable CAN override and return to live event sector
+- `sector=1..255`: force active sector from CAN
+
+Response:
+- status `OK, extra=0x61`
 
 ### `0x6E` `HMC_SET_CFG`
 
@@ -550,7 +559,7 @@ Note:
 - Byte2: sector-follow enabled (`0|1`)
 - Byte3: fade speed (`0..255`)
 - Byte4: configured sector count (`1..255`)
-- Byte5: active sector (from event state)
+- Byte5: active sector (live event sector or CAN override)
 - Byte6: current target sector for crossfade
 - Byte7: max configurable zones (`32`)
 
