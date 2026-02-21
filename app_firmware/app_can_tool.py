@@ -9,6 +9,11 @@ from typing import Callable
 
 CMD_PING = 0x01
 CMD_ENTER_BOOTLOADER = 0x40
+CMD_WS_SET_POWER = 0x50
+CMD_WS_SET_BRIGHTNESS = 0x51
+CMD_WS_SET_COLOR = 0x52
+CMD_WS_SET_ALL = 0x53
+CMD_WS_GET_STATE = 0x54
 CMD_HMC_SET_CFG = 0x6E
 CMD_HMC_GET_CFG = 0x6F
 CMD_SET_INTERVAL = 0x70
@@ -45,6 +50,7 @@ FRAME_AHT20_REG = 0x43
 FRAME_CALIB_VALUE = 0x44
 FRAME_CALIB_INFO = 0x45
 FRAME_HMC_CFG = 0x46
+FRAME_WS_STATE = 0x47
 
 EVENT_NAMES = {
     1: "SECTOR_ACTIVATED",
@@ -98,6 +104,7 @@ FRAME_TYPES = {
     FRAME_CALIB_VALUE,
     FRAME_CALIB_INFO,
     FRAME_HMC_CFG,
+    FRAME_WS_STATE,
 }
 
 CMD_REPLY_FRAME_TYPES = {
@@ -111,6 +118,7 @@ CMD_REPLY_FRAME_TYPES = {
     FRAME_CALIB_VALUE,
     FRAME_CALIB_INFO,
     FRAME_HMC_CFG,
+    FRAME_WS_STATE,
 }
 
 CAL_FIELD_NAME_TO_ID = {
@@ -417,6 +425,44 @@ class AppCanClient:
         frame = self.wait_frame(lambda d: len(d) >= 8 and d[0] == 0 and d[1] == FRAME_STATUS)
         return parse_status_frame(frame)
 
+    def ws_get_state(self) -> dict:
+        self.send_command(bytes([CMD_WS_GET_STATE]))
+        self.wait_status(expected_extra=0x54)
+        frame = self.wait_frame(lambda d: len(d) >= 8 and d[0] == 0 and d[1] == FRAME_WS_STATE)
+        return parse_ws_state_frame(frame)
+
+    def ws_set_power(self, enabled: bool) -> dict:
+        self.send_command(bytes([CMD_WS_SET_POWER, 1 if enabled else 0]))
+        self.wait_status(expected_extra=0x50)
+        frame = self.wait_frame(lambda d: len(d) >= 8 and d[0] == 0 and d[1] == FRAME_WS_STATE)
+        return parse_ws_state_frame(frame)
+
+    def ws_set_brightness(self, brightness: int) -> dict:
+        if brightness < 0 or brightness > 255:
+            raise ValueError("brightness must be 0..255")
+        self.send_command(bytes([CMD_WS_SET_BRIGHTNESS, brightness]))
+        self.wait_status(expected_extra=0x51)
+        frame = self.wait_frame(lambda d: len(d) >= 8 and d[0] == 0 and d[1] == FRAME_WS_STATE)
+        return parse_ws_state_frame(frame)
+
+    def ws_set_color(self, r: int, g: int, b: int) -> dict:
+        for n, v in (("r", r), ("g", g), ("b", b)):
+            if v < 0 or v > 255:
+                raise ValueError(f"{n} must be 0..255")
+        self.send_command(bytes([CMD_WS_SET_COLOR, r, g, b]))
+        self.wait_status(expected_extra=0x52)
+        frame = self.wait_frame(lambda d: len(d) >= 8 and d[0] == 0 and d[1] == FRAME_WS_STATE)
+        return parse_ws_state_frame(frame)
+
+    def ws_set_all(self, enabled: bool, brightness: int, r: int, g: int, b: int) -> dict:
+        for n, v in (("brightness", brightness), ("r", r), ("g", g), ("b", b)):
+            if v < 0 or v > 255:
+                raise ValueError(f"{n} must be 0..255")
+        self.send_command(bytes([CMD_WS_SET_ALL, 1 if enabled else 0, brightness, r, g, b]))
+        self.wait_status(expected_extra=0x53)
+        frame = self.wait_frame(lambda d: len(d) >= 8 and d[0] == 0 and d[1] == FRAME_WS_STATE)
+        return parse_ws_state_frame(frame)
+
     def aht20_read(self) -> dict:
         self.send_command(bytes([CMD_AHT20_READ]))
         self.wait_status(expected_extra=0x74)
@@ -655,6 +701,17 @@ def parse_status_frame(data: bytes) -> dict:
     }
 
 
+def parse_ws_state_frame(data: bytes) -> dict:
+    return {
+        "enabled": bool(data[2]),
+        "brightness": int(data[3]),
+        "r": int(data[4]),
+        "g": int(data[5]),
+        "b": int(data[6]),
+        "strip_len": int(data[7]),
+    }
+
+
 def parse_aht20_meas_frame(data: bytes) -> dict:
     temp_centi = int.from_bytes(data[2:4], "little", signed=True)
     rh_centi = int.from_bytes(data[4:6], "little", signed=False)
@@ -842,6 +899,13 @@ def decode_frame(data: bytes) -> str:
             parsed = parse_hmc_cfg_frame(data)
             return f"HMC_CFG {format_hmc_cfg(parsed)}"
 
+        if subtype == FRAME_WS_STATE and len(data) >= 8:
+            parsed = parse_ws_state_frame(data)
+            return (
+                f"WS_STATE on={int(parsed['enabled'])} br={parsed['brightness']} "
+                f"rgb=({parsed['r']},{parsed['g']},{parsed['b']}) len={parsed['strip_len']}"
+            )
+
         return f"FRAME subtype=0x{subtype:02X} data={data.hex()}"
 
     return f"RAW {data.hex()}"
@@ -938,6 +1002,13 @@ def hmc_mode_arg(value: str) -> int:
     return iv
 
 
+def byte_arg(value: str) -> int:
+    iv = int(value, 0)
+    if iv < 0 or iv > 255:
+        raise argparse.ArgumentTypeError("value must be 0..255")
+    return iv
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="app_firmware CAN host tool")
     parser.add_argument("--channel", default="can0", help="CAN channel (default: can0)")
@@ -973,6 +1044,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_hmc.add_argument("--samples", type=hmc_samples_arg, help="0..3 or sample count (1,2,4,8)")
     p_hmc.add_argument("--mode", type=hmc_mode_arg, help="0..2 or continuous|single|idle")
     p_hmc.add_argument("--save", action="store_true", help="also persist to flash")
+
+    p_led = sub.add_parser("led", help="Get/set WS2812 strip state")
+    p_led.add_argument("--get", action="store_true", help="Read current LED-strip state")
+    p_led.add_argument("--on", action="store_true", help="Enable strip output")
+    p_led.add_argument("--off", action="store_true", help="Disable strip output")
+    p_led.add_argument("--brightness", type=byte_arg, help="0..255")
+    p_led.add_argument("--r", type=byte_arg, help="red 0..255")
+    p_led.add_argument("--g", type=byte_arg, help="green 0..255")
+    p_led.add_argument("--b", type=byte_arg, help="blue 0..255")
 
     p_mon = sub.add_parser("monitor", help="Live decode of incoming app frames")
     p_mon.add_argument("--duration", type=float, default=0.0, help="Seconds to monitor (0 = forever)")
@@ -1094,6 +1174,42 @@ def main() -> int:
             print(f"HMC_CONFIG_SET OK {format_hmc_cfg(info)}")
             if args.save:
                 print("HMC_CONFIG persisted to flash")
+            return 0
+
+        if args.cmd == "led":
+            if args.on and args.off:
+                raise ValueError("choose only one of --on/--off")
+
+            has_rgb = any(v is not None for v in (args.r, args.g, args.b))
+            if has_rgb and not all(v is not None for v in (args.r, args.g, args.b)):
+                raise ValueError("set all of --r --g --b together")
+
+            has_changes = args.on or args.off or args.brightness is not None or has_rgb
+            if args.get or not has_changes:
+                st = client.ws_get_state()
+                print(
+                    f"LED on={int(st['enabled'])} br={st['brightness']} "
+                    f"rgb=({st['r']},{st['g']},{st['b']}) len={st['strip_len']}"
+                )
+                return 0
+
+            current = client.ws_get_state()
+            enabled = current["enabled"]
+            if args.on:
+                enabled = True
+            elif args.off:
+                enabled = False
+
+            brightness = int(current["brightness"] if args.brightness is None else args.brightness)
+            r = int(current["r"] if args.r is None else args.r)
+            g = int(current["g"] if args.g is None else args.g)
+            b = int(current["b"] if args.b is None else args.b)
+
+            st = client.ws_set_all(enabled, brightness, r, g, b)
+            print(
+                f"LED_SET OK on={int(st['enabled'])} br={st['brightness']} "
+                f"rgb=({st['r']},{st['g']},{st['b']}) len={st['strip_len']}"
+            )
             return 0
 
         if args.cmd == "aht20-read":

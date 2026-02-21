@@ -27,6 +27,10 @@
 #define APP_I2C_TIMING                0x0020098EU
 #define APP_I2C_TIMEOUT_MS            50U
 
+#define APP_WS2812_GPIO_PORT          GPIOA
+#define APP_WS2812_PIN                GPIO_PIN_7
+#define APP_WS2812_STRIP_LEN          16U
+
 // Addressing
 #define APP_DEVICE_ID                 0x01U // fallback
 #define APP_DEVICE_ID_MAX             0x7FU
@@ -88,6 +92,11 @@ typedef enum {
     APP_CMD_AHT20_RESET = 0x76,
     APP_CMD_AHT20_SET_REG = 0x77,
     APP_CMD_AHT20_GET_REG = 0x78,
+    APP_CMD_WS_SET_POWER = 0x50,
+    APP_CMD_WS_SET_BRIGHTNESS = 0x51,
+    APP_CMD_WS_SET_COLOR = 0x52,
+    APP_CMD_WS_SET_ALL = 0x53,
+    APP_CMD_WS_GET_STATE = 0x54,
     APP_CMD_CALIB_GET = 0x79,
     APP_CMD_CALIB_SET = 0x7A,
     APP_CMD_CALIB_SAVE = 0x7B,
@@ -119,7 +128,8 @@ typedef enum {
     APP_FRAME_AHT20_REG = 0x43,
     APP_FRAME_CALIB_VALUE = 0x44,
     APP_FRAME_CALIB_INFO = 0x45,
-    APP_FRAME_HMC_CFG = 0x46
+    APP_FRAME_HMC_CFG = 0x46,
+    APP_FRAME_WS_STATE = 0x47
 } app_frame_t;
 
 typedef enum {

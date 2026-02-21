@@ -6,6 +6,7 @@
 #include "calibration.h"
 #include "sensors.h"
 #include "events.h"
+#include "ws2812.h"
 
 #include <string.h>
 
@@ -363,6 +364,24 @@ static void App_SendHmcConfig(void)
     frame[5] = cfg.mode;
     frame[6] = (uint8_t)(cfg.mg_per_digit_centi & 0xFFU);
     frame[7] = (uint8_t)(cfg.mg_per_digit_centi >> 8);
+    APP_CAN_SendFrame(frame, 8);
+}
+
+static void App_SendWsState(void)
+{
+    ws2812_state_t ws = {0};
+    uint8_t frame[8] = {0};
+
+    WS2812_GetState(&ws);
+
+    frame[0] = 0x00;
+    frame[1] = APP_FRAME_WS_STATE;
+    frame[2] = ws.enabled;
+    frame[3] = ws.brightness;
+    frame[4] = ws.r;
+    frame[5] = ws.g;
+    frame[6] = ws.b;
+    frame[7] = (uint8_t)(ws.strip_len & 0xFFU);
     APP_CAN_SendFrame(frame, 8);
 }
 
@@ -745,6 +764,57 @@ static void App_HandleCommand(const uint8_t *data, uint8_t len)
         App_SendAht20Reg(reg_buf, data[1]);
         break;
 
+    case APP_CMD_WS_SET_POWER:
+        if (len < 2U) {
+            APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x50);
+            break;
+        }
+        WS2812_SetEnabled(data[1] ? 1U : 0U);
+        WS2812_Apply();
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x50);
+        App_SendWsState();
+        break;
+
+    case APP_CMD_WS_SET_BRIGHTNESS:
+        if (len < 2U) {
+            APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x51);
+            break;
+        }
+        WS2812_SetBrightness(data[1]);
+        WS2812_Apply();
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x51);
+        App_SendWsState();
+        break;
+
+    case APP_CMD_WS_SET_COLOR:
+        if (len < 4U) {
+            APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x52);
+            break;
+        }
+        WS2812_SetColor(data[1], data[2], data[3]);
+        WS2812_Apply();
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x52);
+        App_SendWsState();
+        break;
+
+    case APP_CMD_WS_SET_ALL:
+        if (len < 6U) {
+            APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x53);
+            break;
+        }
+        WS2812_SetEnabled(data[1] ? 1U : 0U);
+        WS2812_SetBrightness(data[2]);
+        WS2812_SetColor(data[3], data[4], data[5]);
+        WS2812_Apply();
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x53);
+        App_SendWsState();
+        break;
+
+    case APP_CMD_WS_GET_STATE:
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x54);
+        App_SendWsState();
+        break;
+
     case APP_CMD_CALIB_GET:
         sid = (len >= 2U) ? data[1] : 0U;
         if (sid == 0U) {
@@ -851,6 +921,7 @@ int main(void)
     SystemClock_Config();
     Led_Init();
     Led_Set(0);
+    WS2812_Init();
     g_led_pulse_active = 0U;
     g_led_pulse_deadline_ms = 0U;
     CanStandby_Init();

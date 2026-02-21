@@ -49,6 +49,54 @@ Response:
 - status `OK, extra=0x40`
 - app then requests reset to bootloader
 
+### `0x50` `WS_SET_POWER`
+
+Payload:
+- `[0x50, on]`
+- `on`: `0|1`
+
+Response:
+- status `OK, extra=0x50`
+- `WS_STATE` frame (`subtype=0x47`)
+
+### `0x51` `WS_SET_BRIGHTNESS`
+
+Payload:
+- `[0x51, brightness]`
+- `brightness`: `0..255`
+
+Response:
+- status `OK, extra=0x51`
+- `WS_STATE` frame (`subtype=0x47`)
+
+### `0x52` `WS_SET_COLOR`
+
+Payload:
+- `[0x52, r, g, b]`
+- each channel: `0..255`
+
+Response:
+- status `OK, extra=0x52`
+- `WS_STATE` frame (`subtype=0x47`)
+
+### `0x53` `WS_SET_ALL`
+
+Payload:
+- `[0x53, on, brightness, r, g, b]`
+
+Response:
+- status `OK, extra=0x53`
+- `WS_STATE` frame (`subtype=0x47`)
+
+### `0x54` `WS_GET_STATE`
+
+Payload:
+- `[0x54]`
+
+Response:
+- status `OK, extra=0x54`
+- `WS_STATE` frame (`subtype=0x47`)
+
 ### `0x6E` `HMC_SET_CFG`
 
 Payload:
@@ -322,6 +370,15 @@ Event type IDs:
 - Byte4..5: interval_ms (uint16 LE)
 - Byte6: `device_id`
 - Byte7: protocol version
+
+### `0x47` `WS_STATE`
+
+- Byte2: strip enabled (`0|1`)
+- Byte3: brightness (`0..255`)
+- Byte4: red (`0..255`)
+- Byte5: green (`0..255`)
+- Byte6: blue (`0..255`)
+- Byte7: configured strip length (LED count, low byte)
 
 ### `0x31` `STATUS`
 

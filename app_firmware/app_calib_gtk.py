@@ -34,6 +34,7 @@ from app_can_tool import (
     FRAME_MAG,
     FRAME_STARTUP,
     FRAME_STATUS,
+    FRAME_WS_STATE,
     HMC_DATA_RATE_ID_TO_HZ,
     HMC_MODE_ID_TO_NAME,
     HMC_RANGE_ID_TO_LABEL,
@@ -47,6 +48,7 @@ from app_can_tool import (
     parse_hmc_cfg_frame,
     parse_interval_frame,
     parse_status_frame,
+    parse_ws_state_frame,
     status_id_to_device_id,
 )
 
@@ -243,6 +245,7 @@ class CalibApp(Gtk.Application):
         self.suppress_spin_events = False
         self.suppress_stream_events = False
         self.suppress_hmc_events = False
+        self.suppress_ws_events = False
         self.apply_timer_id = 0
         self.pending_apply_fields: set[str] = set()
 
@@ -282,6 +285,15 @@ class CalibApp(Gtk.Application):
             "mode_id": 0,
             "mg_per_digit": 4.35,
         }
+        self.ws_cfg = {
+            "enabled": False,
+            "brightness": 64,
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "strip_len": 0,
+        }
+        self.ws_supported: bool | None = None
 
         self.window = None
         self.left_stack = None
@@ -325,6 +337,7 @@ class CalibApp(Gtk.Application):
         self.aht_label = None
         self.aht_raw_label = None
         self.health_label = None
+        self.ws_status_label = None
 
         self.event_local_buffer = None
         self.event_device_buffer = None
@@ -358,6 +371,11 @@ class CalibApp(Gtk.Application):
         self.hmc_desc_label = None
         self.device_id_spin = None
         self.known_ids_label = None
+        self.ws_enable_switch = None
+        self.ws_brightness_spin = None
+        self.ws_r_spin = None
+        self.ws_g_spin = None
+        self.ws_b_spin = None
 
         self.last_status_text = ""
         self.last_chart_meta_text = ""
@@ -799,6 +817,92 @@ class CalibApp(Gtk.Application):
         hmc_frame.set_child(hmc_box)
         box.append(hmc_frame)
 
+        ws_frame = Gtk.Frame(label="WS2812 Strip (PA7)")
+        ws_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        ws_box.set_margin_start(6)
+        ws_box.set_margin_end(6)
+        ws_box.set_margin_top(6)
+        ws_box.set_margin_bottom(6)
+
+        ws_grid = Gtk.Grid(column_spacing=10, row_spacing=8)
+        ws_grid.attach(Gtk.Label(label="Enabled", xalign=0), 0, 0, 1, 1)
+        self.ws_enable_switch = Gtk.Switch()
+        self.ws_enable_switch.set_active(bool(self.ws_cfg["enabled"]))
+        self.ws_enable_switch.connect(
+            "notify::active",
+            lambda sw, _pspec: self.on_ws_enable_changed(sw.get_active()),
+        )
+        ws_grid.attach(self.ws_enable_switch, 1, 0, 1, 1)
+
+        ws_grid.attach(Gtk.Label(label="Brightness", xalign=0), 0, 1, 1, 1)
+        self.ws_brightness_spin = Gtk.SpinButton()
+        self.ws_brightness_spin.set_range(0, 255)
+        self.ws_brightness_spin.set_increments(1, 8)
+        self.ws_brightness_spin.set_numeric(True)
+        self.ws_brightness_spin.set_value(float(self.ws_cfg["brightness"]))
+        self.ws_brightness_spin.connect(
+            "value-changed",
+            lambda spin: self.on_ws_value_changed("brightness", int(spin.get_value())),
+        )
+        ws_grid.attach(self.ws_brightness_spin, 1, 1, 1, 1)
+
+        ws_grid.attach(Gtk.Label(label="Color R/G/B", xalign=0), 0, 2, 1, 1)
+        rgb_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.ws_r_spin = Gtk.SpinButton()
+        self.ws_r_spin.set_range(0, 255)
+        self.ws_r_spin.set_increments(1, 8)
+        self.ws_r_spin.set_numeric(True)
+        self.ws_r_spin.set_value(float(self.ws_cfg["r"]))
+        self.ws_r_spin.connect(
+            "value-changed",
+            lambda spin: self.on_ws_value_changed("r", int(spin.get_value())),
+        )
+        self.ws_g_spin = Gtk.SpinButton()
+        self.ws_g_spin.set_range(0, 255)
+        self.ws_g_spin.set_increments(1, 8)
+        self.ws_g_spin.set_numeric(True)
+        self.ws_g_spin.set_value(float(self.ws_cfg["g"]))
+        self.ws_g_spin.connect(
+            "value-changed",
+            lambda spin: self.on_ws_value_changed("g", int(spin.get_value())),
+        )
+        self.ws_b_spin = Gtk.SpinButton()
+        self.ws_b_spin.set_range(0, 255)
+        self.ws_b_spin.set_increments(1, 8)
+        self.ws_b_spin.set_numeric(True)
+        self.ws_b_spin.set_value(float(self.ws_cfg["b"]))
+        self.ws_b_spin.connect(
+            "value-changed",
+            lambda spin: self.on_ws_value_changed("b", int(spin.get_value())),
+        )
+        rgb_row.append(self.ws_r_spin)
+        rgb_row.append(self.ws_g_spin)
+        rgb_row.append(self.ws_b_spin)
+        ws_grid.attach(rgb_row, 1, 2, 1, 1)
+        ws_box.append(ws_grid)
+
+        ws_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        b_ws_get = Gtk.Button(label="Get State")
+        b_ws_get.connect("clicked", lambda *_: self.run_async("ws-get", self.action_ws_get))
+        b_ws_apply = Gtk.Button(label="Apply")
+        b_ws_apply.connect("clicked", lambda *_: self.run_async("ws-apply", self.action_ws_apply))
+        b_ws_off = Gtk.Button(label="Off")
+        b_ws_off.connect("clicked", lambda *_: self.run_async("ws-off", self.action_ws_off))
+        b_ws_white = Gtk.Button(label="White")
+        b_ws_white.connect("clicked", lambda *_: self.run_async("ws-white", self.action_ws_white))
+        ws_btns.append(b_ws_get)
+        ws_btns.append(b_ws_apply)
+        ws_btns.append(b_ws_off)
+        ws_btns.append(b_ws_white)
+        ws_box.append(ws_btns)
+
+        self.ws_status_label = Gtk.Label(label="WS2812: -")
+        self.ws_status_label.set_xalign(0)
+        ws_box.append(self.ws_status_label)
+
+        ws_frame.set_child(ws_box)
+        box.append(ws_frame)
+
         live_frame = Gtk.Frame(label="Live Sensors")
         live_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         live_box.set_margin_start(6)
@@ -843,6 +947,8 @@ class CalibApp(Gtk.Application):
 
         live_frame.set_child(live_box)
         box.append(live_frame)
+
+        self.update_ws_widgets()
 
         return box
 
@@ -1237,6 +1343,7 @@ class CalibApp(Gtk.Application):
             self.action_status_locked()
             self.action_refresh_streams_locked()
             self.action_hmc_get_locked()
+            self.action_ws_get_optional_locked()
             self.action_load_runtime_calib_locked()
 
         self.with_lock(_load_locked, min_timeout=CMD_TIMEOUT_SHORT)
@@ -1500,6 +1607,17 @@ class CalibApp(Gtk.Application):
                 self.hmc_cfg["mode_id"] = int(parsed["mode_id"])
                 self.hmc_cfg["mg_per_digit"] = float(parsed["mg_per_digit"])
                 self.update_hmc_widgets()
+
+            elif data[0] == 0 and subtype == FRAME_WS_STATE and len(data) >= 8:
+                parsed = parse_ws_state_frame(data)
+                self.ws_supported = True
+                self.ws_cfg["enabled"] = bool(parsed["enabled"])
+                self.ws_cfg["brightness"] = int(parsed["brightness"])
+                self.ws_cfg["r"] = int(parsed["r"])
+                self.ws_cfg["g"] = int(parsed["g"])
+                self.ws_cfg["b"] = int(parsed["b"])
+                self.ws_cfg["strip_len"] = int(parsed["strip_len"])
+                self.update_ws_widgets()
 
             elif data[0] == 0 and subtype == FRAME_CALIB_VALUE and len(data) >= 5:
                 fid = data[2]
@@ -2281,6 +2399,57 @@ class CalibApp(Gtk.Application):
         )
         self.hmc_desc_label.set_label(desc)
 
+    def on_ws_enable_changed(self, enabled: bool):
+        if self.suppress_ws_events:
+            return
+        self.ws_cfg["enabled"] = bool(enabled)
+
+    def on_ws_value_changed(self, key: str, value: int):
+        if self.suppress_ws_events:
+            return
+        self.ws_cfg[key] = int(value)
+
+    def update_ws_widgets(self):
+        self.suppress_ws_events = True
+        try:
+            if self.ws_enable_switch is not None:
+                self.ws_enable_switch.set_active(bool(self.ws_cfg["enabled"]))
+            if self.ws_brightness_spin is not None:
+                self.ws_brightness_spin.set_value(float(self.ws_cfg["brightness"]))
+            if self.ws_r_spin is not None:
+                self.ws_r_spin.set_value(float(self.ws_cfg["r"]))
+            if self.ws_g_spin is not None:
+                self.ws_g_spin.set_value(float(self.ws_cfg["g"]))
+            if self.ws_b_spin is not None:
+                self.ws_b_spin.set_value(float(self.ws_cfg["b"]))
+        finally:
+            self.suppress_ws_events = False
+        supported = (self.ws_supported is not False)
+        for w in (
+            self.ws_enable_switch,
+            self.ws_brightness_spin,
+            self.ws_r_spin,
+            self.ws_g_spin,
+            self.ws_b_spin,
+        ):
+            if w is not None:
+                w.set_sensitive(supported)
+        self.update_ws_status_label()
+
+    def update_ws_status_label(self):
+        if self.ws_status_label is None:
+            return
+        if self.ws_supported is False:
+            self.ws_status_label.set_label("WS2812: unsupported by current firmware")
+            return
+        self.ws_status_label.set_label(
+            "WS2812: "
+            f"on={int(bool(self.ws_cfg['enabled']))} "
+            f"br={int(self.ws_cfg['brightness'])} "
+            f"rgb=({int(self.ws_cfg['r'])},{int(self.ws_cfg['g'])},{int(self.ws_cfg['b'])}) "
+            f"len={int(self.ws_cfg.get('strip_len', 0))}"
+        )
+
     def action_switch_device(self):
         if self.device_id_spin is None:
             return
@@ -2291,6 +2460,7 @@ class CalibApp(Gtk.Application):
             self.action_status_locked()
             self.action_refresh_streams_locked()
             self.action_hmc_get_locked()
+            self.action_ws_get_optional_locked()
             self.action_load_runtime_calib_locked()
 
         self.with_lock(_switch_locked, min_timeout=CMD_TIMEOUT_LONG)
@@ -2470,6 +2640,77 @@ class CalibApp(Gtk.Application):
         self.hmc_cfg["mg_per_digit"] = float(info["mg_per_digit"])
         GLib.idle_add(self.update_hmc_widgets)
         self.log("HMC config applied" + (" and saved" if save else ""))
+
+    def action_ws_get_locked(self):
+        st = self.client.ws_get_state()
+        self.ws_supported = True
+        self.ws_cfg["enabled"] = bool(st["enabled"])
+        self.ws_cfg["brightness"] = int(st["brightness"])
+        self.ws_cfg["r"] = int(st["r"])
+        self.ws_cfg["g"] = int(st["g"])
+        self.ws_cfg["b"] = int(st["b"])
+        self.ws_cfg["strip_len"] = int(st["strip_len"])
+        GLib.idle_add(self.update_ws_widgets)
+        self.log(
+            "WS state refreshed "
+            f"on={int(self.ws_cfg['enabled'])} br={self.ws_cfg['brightness']} "
+            f"rgb=({self.ws_cfg['r']},{self.ws_cfg['g']},{self.ws_cfg['b']}) len={self.ws_cfg['strip_len']}"
+        )
+
+    def action_ws_get_optional_locked(self):
+        old_timeout = self.client.timeout
+        self.client.timeout = min(self.client.timeout, 0.8)
+        try:
+            self.action_ws_get_locked()
+        except Exception as exc:
+            self.ws_supported = False
+            GLib.idle_add(self.update_ws_widgets)
+            self.log(f"WS control disabled (firmware does not support it): {exc}")
+        finally:
+            self.client.timeout = old_timeout
+
+    def action_ws_get(self):
+        self.with_lock(self.action_ws_get_locked, min_timeout=CMD_TIMEOUT_SHORT)
+
+    def action_ws_apply(self):
+        if self.ws_supported is False:
+            raise RuntimeError("WS2812 control is not supported by current firmware")
+
+        def _apply_locked():
+            return self.client.ws_set_all(
+                bool(self.ws_cfg["enabled"]),
+                int(self.ws_cfg["brightness"]),
+                int(self.ws_cfg["r"]),
+                int(self.ws_cfg["g"]),
+                int(self.ws_cfg["b"]),
+            )
+
+        st = self.with_lock(_apply_locked, min_timeout=CMD_TIMEOUT_SHORT)
+        self.ws_cfg["enabled"] = bool(st["enabled"])
+        self.ws_cfg["brightness"] = int(st["brightness"])
+        self.ws_cfg["r"] = int(st["r"])
+        self.ws_cfg["g"] = int(st["g"])
+        self.ws_cfg["b"] = int(st["b"])
+        self.ws_cfg["strip_len"] = int(st["strip_len"])
+        GLib.idle_add(self.update_ws_widgets)
+        self.log(
+            "WS applied "
+            f"on={int(self.ws_cfg['enabled'])} br={self.ws_cfg['brightness']} "
+            f"rgb=({self.ws_cfg['r']},{self.ws_cfg['g']},{self.ws_cfg['b']})"
+        )
+
+    def action_ws_off(self):
+        self.ws_cfg["enabled"] = False
+        GLib.idle_add(self.update_ws_widgets)
+        self.action_ws_apply()
+
+    def action_ws_white(self):
+        self.ws_cfg["enabled"] = True
+        self.ws_cfg["r"] = 255
+        self.ws_cfg["g"] = 255
+        self.ws_cfg["b"] = 255
+        GLib.idle_add(self.update_ws_widgets)
+        self.action_ws_apply()
 
     def action_aht20_read(self):
         def _read_locked():
