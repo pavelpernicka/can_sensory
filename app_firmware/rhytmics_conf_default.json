@@ -27,6 +27,7 @@
       },
       "instrument": {
         "soundfont": "../../sounds/metal.sf2",
+        "fade_out_on_sector_change": false,
         "bank": 0,
         "preset": 0
       }
@@ -51,6 +52,7 @@
       },
       "instrument": {
         "soundfont": "../../sounds/piano.sf2",
+        "fade_out_on_sector_change": false,
         "bank": 0,
         "preset": 0
       }

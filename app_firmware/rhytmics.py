@@ -637,12 +637,29 @@ class Mixer:
         voice.program_key = key
 
     def play_chord(
-        self, device_id: int, notes: set[int], force_retrigger: bool = False
+        self,
+        device_id: int,
+        notes: set[int],
+        force_retrigger: bool = False,
+        fade_out_existing: bool = False,
     ) -> tuple[list[int], list[int], list[int]]:
         voice = self._voices.get(device_id)
         if voice is None:
             return [], [], []
         self._select_program(voice)
+
+        faded_on_change: list[int] = []
+        if fade_out_existing and voice.note_on_counts:
+            for n in sorted(voice.note_on_counts.keys()):
+                cnt = int(voice.note_on_counts.get(n, 0))
+                if cnt <= 0:
+                    continue
+                for _ in range(cnt):
+                    self._note_off(voice, n)
+                faded_on_change.append(n)
+            voice.held_notes.clear()
+            voice.note_on_counts.clear()
+            voice.note_deadlines.clear()
 
         cleaned = {int(n) for n in notes if 0 <= int(n) <= 127}
         # Additive polyphony: new notes are layered on top of currently held ones.
@@ -691,7 +708,7 @@ class Mixer:
 
         voice.held_notes = target_held
         started = to_start + to_retrigger
-        stopped = to_stop + retrig_released
+        stopped = to_stop + retrig_released + faded_on_change
         return started, stopped, sorted(voice.held_notes)
 
     def stop_device(self, device_id: int) -> list[int]:
@@ -864,6 +881,7 @@ def run() -> int:
         idle_reset_s = max(0.0, float(idle_reset_s))
         pending_notes: dict[int, set[int]] = {did: set() for did in devices.keys()}
         pending_clear: dict[int, bool] = {did: False for did in devices.keys()}
+        pending_fade_on_change: dict[int, bool] = {did: False for did in devices.keys()}
         zero_rearm: dict[int, bool] = {did: False for did in devices.keys()}
         pending_retrigger: dict[int, bool] = {did: False for did in devices.keys()}
         last_sector_seen: dict[int, int | None] = {did: None for did in devices.keys()}
@@ -903,6 +921,13 @@ def run() -> int:
                 was_added = note not in pending_notes[device_id]
                 pending_notes[device_id].add(note)
                 pending_clear[device_id] = False
+                if (
+                    bool(cfg.instrument.fade_out_on_sector_change)
+                    and prev_sector not in (None, 0)
+                    and int(sector) > 0
+                    and int(sector) != int(prev_sector)
+                ):
+                    pending_fade_on_change[device_id] = True
                 if ignore_sector_zero and zero_rearm[device_id]:
                     pending_retrigger[device_id] = True
                     zero_rearm[device_id] = False
@@ -943,9 +968,20 @@ def run() -> int:
             else:
                 note = sector_to_note(cfg, sector)
                 retrig = bool(ignore_sector_zero and zero_rearm[device_id])
+                fade_on_change = bool(
+                    cfg.instrument.fade_out_on_sector_change
+                    and prev_sector not in (None, 0)
+                    and int(sector) > 0
+                    and int(sector) != int(prev_sector)
+                )
                 if retrig:
                     zero_rearm[device_id] = False
-                started, stopped, active = mixer.play_chord(device_id, {note}, force_retrigger=retrig)
+                started, stopped, active = mixer.play_chord(
+                    device_id,
+                    {note},
+                    force_retrigger=retrig,
+                    fade_out_existing=fade_on_change,
+                )
                 if args.debug and (started or stopped):
                     sf = instrument_label(cfg)
                     print(
@@ -976,7 +1012,10 @@ def run() -> int:
                         stopped = mixer.stop_device(did)
                     elif notes:
                         started, stopped, active = mixer.play_chord(
-                            did, set(notes), force_retrigger=pending_retrigger[did]
+                            did,
+                            set(notes),
+                            force_retrigger=pending_retrigger[did],
+                            fade_out_existing=pending_fade_on_change[did],
                         )
                         pending_retrigger[did] = False
 
@@ -989,6 +1028,7 @@ def run() -> int:
 
                     pending_notes[did].clear()
                     pending_clear[did] = False
+                    pending_fade_on_change[did] = False
 
                 if args.debug and beat_debug_rows:
                     print(

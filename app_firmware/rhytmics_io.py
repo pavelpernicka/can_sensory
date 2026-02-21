@@ -27,6 +27,7 @@ class Instrument:
     soundfont: str = ""
     bank: int = 0
     preset: int = 0
+    fade_out_on_sector_change: bool = False
     midi_port: str | None = None
     midi_device: str | None = None
     faust_dsp: str | None = None
@@ -319,6 +320,14 @@ def load_device_configs(default_cfg_path: Path, user_cfg_path: Path) -> dict[int
             )
         elif isinstance(inst_raw, dict):
             inst_type = str(inst_raw.get("type", "soundfont")).strip().lower() or "soundfont"
+            fade_on_change = bool(
+                _opt_bool(
+                    inst_raw.get(
+                        "fade_out_on_sector_change",
+                        inst_raw.get("fade_on_sector_change", inst_raw.get("release_on_sector_change", False)),
+                    )
+                )
+            )
             if inst_type == "faust":
                 dsp = _resolve_optional_local_path(inst_raw.get("dsp", inst_raw.get("faust_dsp", None)))
                 cmd = _parse_command(inst_raw.get("command", inst_raw.get("faust_command", None)))
@@ -337,6 +346,7 @@ def load_device_configs(default_cfg_path: Path, user_cfg_path: Path) -> dict[int
                     soundfont="",
                     bank=int(inst_raw.get("bank", 0)),
                     preset=int(inst_raw.get("preset", 0)),
+                    fade_out_on_sector_change=fade_on_change,
                     faust_dsp=dsp,
                     faust_command=cmd,
                     faust_midi_port=(
@@ -376,6 +386,7 @@ def load_device_configs(default_cfg_path: Path, user_cfg_path: Path) -> dict[int
                     soundfont="",
                     bank=int(inst_raw.get("bank", 0)),
                     preset=int(inst_raw.get("preset", 0)),
+                    fade_out_on_sector_change=fade_on_change,
                     midi_port=midi_port,
                     midi_device=midi_device,
                 )
@@ -385,6 +396,7 @@ def load_device_configs(default_cfg_path: Path, user_cfg_path: Path) -> dict[int
                     soundfont=resolve_soundfont(str(inst_raw.get("soundfont", "../../sounds/piano.sf2"))),
                     bank=int(inst_raw.get("bank", 0)),
                     preset=int(inst_raw.get("preset", 0)),
+                    fade_out_on_sector_change=fade_on_change,
                 )
             inst_cc = _parse_any_cc(inst_raw, ["midi_cc", "cc", "controls", "soundfont_cc"])
         else:
