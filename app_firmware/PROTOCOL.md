@@ -96,6 +96,55 @@ Payload:
 Response:
 - status `OK, extra=0x54`
 - `WS_STATE` frame (`subtype=0x47`)
+- `WS_ANIM` frame (`subtype=0x48`)
+
+### `0x55` `WS_SET_ANIM`
+
+Payload:
+- `[0x55, mode, speed]`
+- `mode`:
+  - `0` static
+  - `1` blink
+  - `2` breathe
+  - `3` rainbow
+  - `4` wipe
+  - `5` gradient (spatial split/fade pattern)
+- `speed`: `0..255` (meaning depends on mode)
+
+Response:
+- status `OK, extra=0x55`
+- `WS_ANIM` frame (`subtype=0x48`)
+
+### `0x56` `WS_GET_ANIM`
+
+Payload:
+- `[0x56]`
+
+Response:
+- status `OK, extra=0x56`
+- `WS_ANIM` frame (`subtype=0x48`)
+
+### `0x57` `WS_SET_GRADIENT`
+
+Payload:
+- `[0x57, split_idx, fade_px, c1_lo, c1_hi, c2_lo, c2_hi]`
+- `split_idx`: split position in 1-based LED index
+- `fade_px`: half-width of blend region in pixels
+- `c1/c2`: RGB565 colors (`uint16 LE`)
+
+Response:
+- status `OK, extra=0x57`
+- `WS_ANIM` frame (`subtype=0x48`) with mode `gradient`
+- `WS_GRADIENT` frame (`subtype=0x49`)
+
+### `0x58` `WS_GET_GRADIENT`
+
+Payload:
+- `[0x58]`
+
+Response:
+- status `OK, extra=0x58`
+- `WS_GRADIENT` frame (`subtype=0x49`)
 
 ### `0x6E` `HMC_SET_CFG`
 
@@ -379,6 +428,19 @@ Event type IDs:
 - Byte5: green (`0..255`)
 - Byte6: blue (`0..255`)
 - Byte7: configured strip length (LED count, low byte)
+
+### `0x48` `WS_ANIM`
+
+- Byte2: animation mode (`0..5`)
+- Byte3: speed (`0..255`)
+- Byte4..7: reserved (`0x00`)
+
+### `0x49` `WS_GRADIENT`
+
+- Byte2: split index (1-based)
+- Byte3: fade half-width in px
+- Byte4..5: color1 RGB565 (`uint16 LE`)
+- Byte6..7: color2 RGB565 (`uint16 LE`)
 
 ### `0x31` `STATUS`
 

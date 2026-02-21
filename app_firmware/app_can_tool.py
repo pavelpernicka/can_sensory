@@ -14,6 +14,10 @@ CMD_WS_SET_BRIGHTNESS = 0x51
 CMD_WS_SET_COLOR = 0x52
 CMD_WS_SET_ALL = 0x53
 CMD_WS_GET_STATE = 0x54
+CMD_WS_SET_ANIM = 0x55
+CMD_WS_GET_ANIM = 0x56
+CMD_WS_SET_GRADIENT = 0x57
+CMD_WS_GET_GRADIENT = 0x58
 CMD_HMC_SET_CFG = 0x6E
 CMD_HMC_GET_CFG = 0x6F
 CMD_SET_INTERVAL = 0x70
@@ -51,6 +55,8 @@ FRAME_CALIB_VALUE = 0x44
 FRAME_CALIB_INFO = 0x45
 FRAME_HMC_CFG = 0x46
 FRAME_WS_STATE = 0x47
+FRAME_WS_ANIM = 0x48
+FRAME_WS_GRADIENT = 0x49
 
 EVENT_NAMES = {
     1: "SECTOR_ACTIVATED",
@@ -105,6 +111,8 @@ FRAME_TYPES = {
     FRAME_CALIB_INFO,
     FRAME_HMC_CFG,
     FRAME_WS_STATE,
+    FRAME_WS_ANIM,
+    FRAME_WS_GRADIENT,
 }
 
 CMD_REPLY_FRAME_TYPES = {
@@ -119,7 +127,19 @@ CMD_REPLY_FRAME_TYPES = {
     FRAME_CALIB_INFO,
     FRAME_HMC_CFG,
     FRAME_WS_STATE,
+    FRAME_WS_ANIM,
+    FRAME_WS_GRADIENT,
 }
+
+WS_ANIM_NAME_TO_ID = {
+    "static": 0,
+    "blink": 1,
+    "breathe": 2,
+    "rainbow": 3,
+    "wipe": 4,
+    "gradient": 5,
+}
+WS_ANIM_ID_TO_NAME = {v: k for k, v in WS_ANIM_NAME_TO_ID.items()}
 
 CAL_FIELD_NAME_TO_ID = {
     "center_x": 1,
@@ -463,6 +483,46 @@ class AppCanClient:
         frame = self.wait_frame(lambda d: len(d) >= 8 and d[0] == 0 and d[1] == FRAME_WS_STATE)
         return parse_ws_state_frame(frame)
 
+    def ws_get_anim(self) -> dict:
+        self.send_command(bytes([CMD_WS_GET_ANIM]))
+        self.wait_status(expected_extra=0x56)
+        frame = self.wait_frame(lambda d: len(d) >= 4 and d[0] == 0 and d[1] == FRAME_WS_ANIM)
+        return parse_ws_anim_frame(frame)
+
+    def ws_set_anim(self, mode: int, speed: int) -> dict:
+        if mode < 0 or mode > 5:
+            raise ValueError("animation mode must be 0..5")
+        if speed < 0 or speed > 255:
+            raise ValueError("animation speed must be 0..255")
+        self.send_command(bytes([CMD_WS_SET_ANIM, mode, speed]))
+        self.wait_status(expected_extra=0x55)
+        frame = self.wait_frame(lambda d: len(d) >= 4 and d[0] == 0 and d[1] == FRAME_WS_ANIM)
+        return parse_ws_anim_frame(frame)
+
+    def ws_get_gradient(self) -> dict:
+        self.send_command(bytes([CMD_WS_GET_GRADIENT]))
+        self.wait_status(expected_extra=0x58)
+        frame = self.wait_frame(lambda d: len(d) >= 8 and d[0] == 0 and d[1] == FRAME_WS_GRADIENT)
+        return parse_ws_gradient_frame(frame)
+
+    def ws_set_gradient(self, split_idx: int, fade_px: int, c1_rgb565: int, c2_rgb565: int) -> dict:
+        if split_idx < 1 or split_idx > 255:
+            raise ValueError("split index must be 1..255")
+        if fade_px < 0 or fade_px > 255:
+            raise ValueError("fade pixels must be 0..255")
+        if c1_rgb565 < 0 or c1_rgb565 > 0xFFFF or c2_rgb565 < 0 or c2_rgb565 > 0xFFFF:
+            raise ValueError("colors must be RGB565 (0..65535)")
+        self.send_command(bytes([
+            CMD_WS_SET_GRADIENT,
+            split_idx & 0xFF,
+            fade_px & 0xFF,
+            c1_rgb565 & 0xFF, (c1_rgb565 >> 8) & 0xFF,
+            c2_rgb565 & 0xFF, (c2_rgb565 >> 8) & 0xFF,
+        ]))
+        self.wait_status(expected_extra=0x57)
+        frame = self.wait_frame(lambda d: len(d) >= 8 and d[0] == 0 and d[1] == FRAME_WS_GRADIENT)
+        return parse_ws_gradient_frame(frame)
+
     def aht20_read(self) -> dict:
         self.send_command(bytes([CMD_AHT20_READ]))
         self.wait_status(expected_extra=0x74)
@@ -712,6 +772,25 @@ def parse_ws_state_frame(data: bytes) -> dict:
     }
 
 
+def parse_ws_anim_frame(data: bytes) -> dict:
+    mode = int(data[2])
+    speed = int(data[3])
+    return {
+        "mode": mode,
+        "mode_name": WS_ANIM_ID_TO_NAME.get(mode, f"{mode}"),
+        "speed": speed,
+    }
+
+
+def parse_ws_gradient_frame(data: bytes) -> dict:
+    return {
+        "split_idx": int(data[2]),
+        "fade_px": int(data[3]),
+        "color1_rgb565": int.from_bytes(data[4:6], "little"),
+        "color2_rgb565": int.from_bytes(data[6:8], "little"),
+    }
+
+
 def parse_aht20_meas_frame(data: bytes) -> dict:
     temp_centi = int.from_bytes(data[2:4], "little", signed=True)
     rh_centi = int.from_bytes(data[4:6], "little", signed=False)
@@ -906,6 +985,17 @@ def decode_frame(data: bytes) -> str:
                 f"rgb=({parsed['r']},{parsed['g']},{parsed['b']}) len={parsed['strip_len']}"
             )
 
+        if subtype == FRAME_WS_ANIM and len(data) >= 4:
+            parsed = parse_ws_anim_frame(data)
+            return f"WS_ANIM mode={parsed['mode_name']}({parsed['mode']}) speed={parsed['speed']}"
+
+        if subtype == FRAME_WS_GRADIENT and len(data) >= 8:
+            parsed = parse_ws_gradient_frame(data)
+            return (
+                f"WS_GRAD split={parsed['split_idx']} fade={parsed['fade_px']} "
+                f"c1=0x{parsed['color1_rgb565']:04X} c2=0x{parsed['color2_rgb565']:04X}"
+            )
+
         return f"FRAME subtype=0x{subtype:02X} data={data.hex()}"
 
     return f"RAW {data.hex()}"
@@ -1009,6 +1099,23 @@ def byte_arg(value: str) -> int:
     return iv
 
 
+def ws_anim_arg(value: str) -> int:
+    key = value.strip().lower()
+    if key in WS_ANIM_NAME_TO_ID:
+        return WS_ANIM_NAME_TO_ID[key]
+    iv = int(value, 0)
+    if iv < 0 or iv > 5:
+        raise argparse.ArgumentTypeError("animation must be static|blink|breathe|rainbow|wipe|gradient or 0..5")
+    return iv
+
+
+def rgb565_arg(value: str) -> int:
+    iv = int(value, 0)
+    if iv < 0 or iv > 0xFFFF:
+        raise argparse.ArgumentTypeError("RGB565 value must be 0..65535 (0x0000..0xFFFF)")
+    return iv
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="app_firmware CAN host tool")
     parser.add_argument("--channel", default="can0", help="CAN channel (default: can0)")
@@ -1053,6 +1160,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_led.add_argument("--r", type=byte_arg, help="red 0..255")
     p_led.add_argument("--g", type=byte_arg, help="green 0..255")
     p_led.add_argument("--b", type=byte_arg, help="blue 0..255")
+    p_led.add_argument("--anim", type=ws_anim_arg, help="static|blink|breathe|rainbow|wipe|gradient or 0..5")
+    p_led.add_argument("--anim-speed", type=byte_arg, help="animation speed 0..255")
+    p_led.add_argument("--anim-get", action="store_true", help="Read animation config")
+    p_led.add_argument("--grad-get", action="store_true", help="Read gradient config")
+    p_led.add_argument("--grad-split", type=byte_arg, help="gradient split LED index (1-based)")
+    p_led.add_argument("--grad-fade", type=byte_arg, help="gradient fade half-width in pixels")
+    p_led.add_argument("--grad-c1", type=rgb565_arg, help="gradient color1 RGB565 (e.g. 0x001F)")
+    p_led.add_argument("--grad-c2", type=rgb565_arg, help="gradient color2 RGB565 (e.g. 0xF800)")
 
     p_mon = sub.add_parser("monitor", help="Live decode of incoming app frames")
     p_mon.add_argument("--duration", type=float, default=0.0, help="Seconds to monitor (0 = forever)")
@@ -1183,6 +1298,42 @@ def main() -> int:
             has_rgb = any(v is not None for v in (args.r, args.g, args.b))
             if has_rgb and not all(v is not None for v in (args.r, args.g, args.b)):
                 raise ValueError("set all of --r --g --b together")
+
+            has_grad = any(v is not None for v in (args.grad_split, args.grad_fade, args.grad_c1, args.grad_c2))
+            if has_grad:
+                if not all(v is not None for v in (args.grad_split, args.grad_fade, args.grad_c1, args.grad_c2)):
+                    raise ValueError("set all of --grad-split --grad-fade --grad-c1 --grad-c2 together")
+                st = client.ws_set_gradient(
+                    int(args.grad_split),
+                    int(args.grad_fade),
+                    int(args.grad_c1),
+                    int(args.grad_c2),
+                )
+                print(
+                    f"LED_GRAD_SET OK split={st['split_idx']} fade={st['fade_px']} "
+                    f"c1=0x{st['color1_rgb565']:04X} c2=0x{st['color2_rgb565']:04X}"
+                )
+                return 0
+            if args.grad_get:
+                st = client.ws_get_gradient()
+                print(
+                    f"LED_GRAD split={st['split_idx']} fade={st['fade_px']} "
+                    f"c1=0x{st['color1_rgb565']:04X} c2=0x{st['color2_rgb565']:04X}"
+                )
+                return 0
+
+            has_anim = args.anim is not None or args.anim_speed is not None
+            if has_anim:
+                cur = client.ws_get_anim()
+                mode = cur["mode"] if args.anim is None else int(args.anim)
+                speed = cur["speed"] if args.anim_speed is None else int(args.anim_speed)
+                st = client.ws_set_anim(mode, speed)
+                print(f"LED_ANIM_SET OK mode={st['mode_name']}({st['mode']}) speed={st['speed']}")
+                return 0
+            if args.anim_get:
+                st = client.ws_get_anim()
+                print(f"LED_ANIM mode={st['mode_name']}({st['mode']}) speed={st['speed']}")
+                return 0
 
             has_changes = args.on or args.off or args.brightness is not None or has_rgb
             if args.get or not has_changes:

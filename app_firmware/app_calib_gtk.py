@@ -35,6 +35,7 @@ from app_can_tool import (
     FRAME_STARTUP,
     FRAME_STATUS,
     FRAME_WS_STATE,
+    FRAME_WS_ANIM,
     HMC_DATA_RATE_ID_TO_HZ,
     HMC_MODE_ID_TO_NAME,
     HMC_RANGE_ID_TO_LABEL,
@@ -48,8 +49,12 @@ from app_can_tool import (
     parse_hmc_cfg_frame,
     parse_interval_frame,
     parse_status_frame,
+    parse_ws_anim_frame,
+    parse_ws_gradient_frame,
     parse_ws_state_frame,
     status_id_to_device_id,
+    WS_ANIM_ID_TO_NAME,
+    WS_ANIM_NAME_TO_ID,
 )
 
 gi.require_version("Gtk", "4.0")
@@ -100,6 +105,7 @@ MAX_RENDER_ENV_POINTS = 2000
 CMD_TIMEOUT_SHORT = 3.0
 CMD_TIMEOUT_LONG = 5.0
 EVENT_TYPE_IDS = sorted(EVENT_NAMES.keys())
+WS_ANIM_ROWS = sorted(WS_ANIM_NAME_TO_ID.items(), key=lambda kv: kv[1])
 
 
 def compute_slope_cdeg(x_mg: int, y_mg: int, z_mg: int) -> int:
@@ -113,6 +119,23 @@ def compute_plane_slopes_cdeg(x_mg: int, y_mg: int, z_mg: int) -> tuple[int, int
     slope_xz = int(round(math.degrees(math.atan2(float(z_mg), float(x_mg) + 1e-6)) * 100.0))
     slope_yz = int(round(math.degrees(math.atan2(float(z_mg), float(y_mg) + 1e-6)) * 100.0))
     return slope_xy, slope_xz, slope_yz
+
+
+def rgb888_to_rgb565(r: int, g: int, b: int) -> int:
+    r5 = (int(r) * 31 + 127) // 255
+    g6 = (int(g) * 63 + 127) // 255
+    b5 = (int(b) * 31 + 127) // 255
+    return (r5 << 11) | (g6 << 5) | b5
+
+
+def rgb565_to_rgb888(c: int) -> tuple[int, int, int]:
+    r5 = (int(c) >> 11) & 0x1F
+    g6 = (int(c) >> 5) & 0x3F
+    b5 = int(c) & 0x1F
+    r = (r5 * 255 + 15) // 31
+    g = (g6 * 255 + 31) // 63
+    b = (b5 * 255 + 15) // 31
+    return r, g, b
 
 
 def decimate_points(data, limit: int):
@@ -293,6 +316,20 @@ class CalibApp(Gtk.Application):
             "b": 255,
             "strip_len": 0,
         }
+        self.ws_anim_cfg = {
+            "mode": 0,
+            "speed": 120,
+        }
+        self.ws_grad_cfg = {
+            "split_idx": 30,
+            "fade_px": 4,
+            "c1_r": 0,
+            "c1_g": 0,
+            "c1_b": 255,
+            "c2_r": 255,
+            "c2_g": 0,
+            "c2_b": 0,
+        }
         self.ws_supported: bool | None = None
 
         self.window = None
@@ -376,6 +413,16 @@ class CalibApp(Gtk.Application):
         self.ws_r_spin = None
         self.ws_g_spin = None
         self.ws_b_spin = None
+        self.ws_anim_combo = None
+        self.ws_anim_speed_spin = None
+        self.ws_grad_split_spin = None
+        self.ws_grad_fade_spin = None
+        self.ws_grad_c1_r_spin = None
+        self.ws_grad_c1_g_spin = None
+        self.ws_grad_c1_b_spin = None
+        self.ws_grad_c2_r_spin = None
+        self.ws_grad_c2_g_spin = None
+        self.ws_grad_c2_b_spin = None
 
         self.last_status_text = ""
         self.last_chart_meta_text = ""
@@ -879,6 +926,91 @@ class CalibApp(Gtk.Application):
         rgb_row.append(self.ws_g_spin)
         rgb_row.append(self.ws_b_spin)
         ws_grid.attach(rgb_row, 1, 2, 1, 1)
+
+        ws_grid.attach(Gtk.Label(label="Animation", xalign=0), 0, 3, 1, 1)
+        self.ws_anim_combo = Gtk.ComboBoxText()
+        for name, mode_id in WS_ANIM_ROWS:
+            self.ws_anim_combo.append(str(mode_id), f"{mode_id}: {name}")
+        self.ws_anim_combo.set_active_id(str(int(self.ws_anim_cfg["mode"])))
+        self.ws_anim_combo.connect("changed", self.on_ws_anim_combo_changed)
+        ws_grid.attach(self.ws_anim_combo, 1, 3, 1, 1)
+
+        ws_grid.attach(Gtk.Label(label="Anim Speed", xalign=0), 0, 4, 1, 1)
+        self.ws_anim_speed_spin = Gtk.SpinButton()
+        self.ws_anim_speed_spin.set_range(0, 255)
+        self.ws_anim_speed_spin.set_increments(1, 8)
+        self.ws_anim_speed_spin.set_numeric(True)
+        self.ws_anim_speed_spin.set_value(float(self.ws_anim_cfg["speed"]))
+        self.ws_anim_speed_spin.connect("value-changed", self.on_ws_anim_speed_changed)
+        ws_grid.attach(self.ws_anim_speed_spin, 1, 4, 1, 1)
+
+        ws_grid.attach(Gtk.Label(label="Grad Split", xalign=0), 0, 5, 1, 1)
+        self.ws_grad_split_spin = Gtk.SpinButton()
+        self.ws_grad_split_spin.set_range(1, 255)
+        self.ws_grad_split_spin.set_increments(1, 8)
+        self.ws_grad_split_spin.set_numeric(True)
+        self.ws_grad_split_spin.set_value(float(self.ws_grad_cfg["split_idx"]))
+        self.ws_grad_split_spin.connect("value-changed", self.on_ws_grad_split_changed)
+        ws_grid.attach(self.ws_grad_split_spin, 1, 5, 1, 1)
+
+        ws_grid.attach(Gtk.Label(label="Grad Fade", xalign=0), 0, 6, 1, 1)
+        self.ws_grad_fade_spin = Gtk.SpinButton()
+        self.ws_grad_fade_spin.set_range(0, 255)
+        self.ws_grad_fade_spin.set_increments(1, 8)
+        self.ws_grad_fade_spin.set_numeric(True)
+        self.ws_grad_fade_spin.set_value(float(self.ws_grad_cfg["fade_px"]))
+        self.ws_grad_fade_spin.connect("value-changed", self.on_ws_grad_fade_changed)
+        ws_grid.attach(self.ws_grad_fade_spin, 1, 6, 1, 1)
+
+        ws_grid.attach(Gtk.Label(label="Grad C1 R/G/B", xalign=0), 0, 7, 1, 1)
+        c1_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.ws_grad_c1_r_spin = Gtk.SpinButton()
+        self.ws_grad_c1_r_spin.set_range(0, 255)
+        self.ws_grad_c1_r_spin.set_increments(1, 8)
+        self.ws_grad_c1_r_spin.set_numeric(True)
+        self.ws_grad_c1_r_spin.set_value(float(self.ws_grad_cfg["c1_r"]))
+        self.ws_grad_c1_r_spin.connect("value-changed", lambda s: self.on_ws_grad_color_changed("c1_r", int(s.get_value())))
+        self.ws_grad_c1_g_spin = Gtk.SpinButton()
+        self.ws_grad_c1_g_spin.set_range(0, 255)
+        self.ws_grad_c1_g_spin.set_increments(1, 8)
+        self.ws_grad_c1_g_spin.set_numeric(True)
+        self.ws_grad_c1_g_spin.set_value(float(self.ws_grad_cfg["c1_g"]))
+        self.ws_grad_c1_g_spin.connect("value-changed", lambda s: self.on_ws_grad_color_changed("c1_g", int(s.get_value())))
+        self.ws_grad_c1_b_spin = Gtk.SpinButton()
+        self.ws_grad_c1_b_spin.set_range(0, 255)
+        self.ws_grad_c1_b_spin.set_increments(1, 8)
+        self.ws_grad_c1_b_spin.set_numeric(True)
+        self.ws_grad_c1_b_spin.set_value(float(self.ws_grad_cfg["c1_b"]))
+        self.ws_grad_c1_b_spin.connect("value-changed", lambda s: self.on_ws_grad_color_changed("c1_b", int(s.get_value())))
+        c1_row.append(self.ws_grad_c1_r_spin)
+        c1_row.append(self.ws_grad_c1_g_spin)
+        c1_row.append(self.ws_grad_c1_b_spin)
+        ws_grid.attach(c1_row, 1, 7, 1, 1)
+
+        ws_grid.attach(Gtk.Label(label="Grad C2 R/G/B", xalign=0), 0, 8, 1, 1)
+        c2_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.ws_grad_c2_r_spin = Gtk.SpinButton()
+        self.ws_grad_c2_r_spin.set_range(0, 255)
+        self.ws_grad_c2_r_spin.set_increments(1, 8)
+        self.ws_grad_c2_r_spin.set_numeric(True)
+        self.ws_grad_c2_r_spin.set_value(float(self.ws_grad_cfg["c2_r"]))
+        self.ws_grad_c2_r_spin.connect("value-changed", lambda s: self.on_ws_grad_color_changed("c2_r", int(s.get_value())))
+        self.ws_grad_c2_g_spin = Gtk.SpinButton()
+        self.ws_grad_c2_g_spin.set_range(0, 255)
+        self.ws_grad_c2_g_spin.set_increments(1, 8)
+        self.ws_grad_c2_g_spin.set_numeric(True)
+        self.ws_grad_c2_g_spin.set_value(float(self.ws_grad_cfg["c2_g"]))
+        self.ws_grad_c2_g_spin.connect("value-changed", lambda s: self.on_ws_grad_color_changed("c2_g", int(s.get_value())))
+        self.ws_grad_c2_b_spin = Gtk.SpinButton()
+        self.ws_grad_c2_b_spin.set_range(0, 255)
+        self.ws_grad_c2_b_spin.set_increments(1, 8)
+        self.ws_grad_c2_b_spin.set_numeric(True)
+        self.ws_grad_c2_b_spin.set_value(float(self.ws_grad_cfg["c2_b"]))
+        self.ws_grad_c2_b_spin.connect("value-changed", lambda s: self.on_ws_grad_color_changed("c2_b", int(s.get_value())))
+        c2_row.append(self.ws_grad_c2_r_spin)
+        c2_row.append(self.ws_grad_c2_g_spin)
+        c2_row.append(self.ws_grad_c2_b_spin)
+        ws_grid.attach(c2_row, 1, 8, 1, 1)
         ws_box.append(ws_grid)
 
         ws_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -890,10 +1022,22 @@ class CalibApp(Gtk.Application):
         b_ws_off.connect("clicked", lambda *_: self.run_async("ws-off", self.action_ws_off))
         b_ws_white = Gtk.Button(label="White")
         b_ws_white.connect("clicked", lambda *_: self.run_async("ws-white", self.action_ws_white))
+        b_ws_anim_get = Gtk.Button(label="Get Anim")
+        b_ws_anim_get.connect("clicked", lambda *_: self.run_async("ws-anim-get", self.action_ws_anim_get))
+        b_ws_anim_apply = Gtk.Button(label="Apply Anim")
+        b_ws_anim_apply.connect("clicked", lambda *_: self.run_async("ws-anim-apply", self.action_ws_anim_apply))
+        b_ws_grad_get = Gtk.Button(label="Get Gradient")
+        b_ws_grad_get.connect("clicked", lambda *_: self.run_async("ws-grad-get", self.action_ws_grad_get))
+        b_ws_grad_apply = Gtk.Button(label="Apply Gradient")
+        b_ws_grad_apply.connect("clicked", lambda *_: self.run_async("ws-grad-apply", self.action_ws_grad_apply))
         ws_btns.append(b_ws_get)
         ws_btns.append(b_ws_apply)
         ws_btns.append(b_ws_off)
         ws_btns.append(b_ws_white)
+        ws_btns.append(b_ws_anim_get)
+        ws_btns.append(b_ws_anim_apply)
+        ws_btns.append(b_ws_grad_get)
+        ws_btns.append(b_ws_grad_apply)
         ws_box.append(ws_btns)
 
         self.ws_status_label = Gtk.Label(label="WS2812: -")
@@ -1617,6 +1761,28 @@ class CalibApp(Gtk.Application):
                 self.ws_cfg["g"] = int(parsed["g"])
                 self.ws_cfg["b"] = int(parsed["b"])
                 self.ws_cfg["strip_len"] = int(parsed["strip_len"])
+                self.update_ws_widgets()
+
+            elif data[0] == 0 and subtype == FRAME_WS_ANIM and len(data) >= 4:
+                parsed = parse_ws_anim_frame(data)
+                self.ws_supported = True
+                self.ws_anim_cfg["mode"] = int(parsed["mode"])
+                self.ws_anim_cfg["speed"] = int(parsed["speed"])
+                self.update_ws_widgets()
+
+            elif data[0] == 0 and subtype == FRAME_WS_GRADIENT and len(data) >= 8:
+                parsed = parse_ws_gradient_frame(data)
+                self.ws_supported = True
+                self.ws_grad_cfg["split_idx"] = int(parsed["split_idx"])
+                self.ws_grad_cfg["fade_px"] = int(parsed["fade_px"])
+                r1, g1, b1 = rgb565_to_rgb888(int(parsed["color1_rgb565"]))
+                r2, g2, b2 = rgb565_to_rgb888(int(parsed["color2_rgb565"]))
+                self.ws_grad_cfg["c1_r"] = r1
+                self.ws_grad_cfg["c1_g"] = g1
+                self.ws_grad_cfg["c1_b"] = b1
+                self.ws_grad_cfg["c2_r"] = r2
+                self.ws_grad_cfg["c2_g"] = g2
+                self.ws_grad_cfg["c2_b"] = b2
                 self.update_ws_widgets()
 
             elif data[0] == 0 and subtype == FRAME_CALIB_VALUE and len(data) >= 5:
@@ -2409,6 +2575,34 @@ class CalibApp(Gtk.Application):
             return
         self.ws_cfg[key] = int(value)
 
+    def on_ws_anim_combo_changed(self, combo: Gtk.ComboBoxText):
+        if self.suppress_ws_events:
+            return
+        active = combo.get_active_id()
+        if active is None:
+            return
+        self.ws_anim_cfg["mode"] = int(active)
+
+    def on_ws_anim_speed_changed(self, spin: Gtk.SpinButton):
+        if self.suppress_ws_events:
+            return
+        self.ws_anim_cfg["speed"] = int(spin.get_value())
+
+    def on_ws_grad_split_changed(self, spin: Gtk.SpinButton):
+        if self.suppress_ws_events:
+            return
+        self.ws_grad_cfg["split_idx"] = int(spin.get_value())
+
+    def on_ws_grad_fade_changed(self, spin: Gtk.SpinButton):
+        if self.suppress_ws_events:
+            return
+        self.ws_grad_cfg["fade_px"] = int(spin.get_value())
+
+    def on_ws_grad_color_changed(self, key: str, value: int):
+        if self.suppress_ws_events:
+            return
+        self.ws_grad_cfg[key] = int(value)
+
     def update_ws_widgets(self):
         self.suppress_ws_events = True
         try:
@@ -2422,6 +2616,26 @@ class CalibApp(Gtk.Application):
                 self.ws_g_spin.set_value(float(self.ws_cfg["g"]))
             if self.ws_b_spin is not None:
                 self.ws_b_spin.set_value(float(self.ws_cfg["b"]))
+            if self.ws_anim_combo is not None:
+                self.ws_anim_combo.set_active_id(str(int(self.ws_anim_cfg["mode"])))
+            if self.ws_anim_speed_spin is not None:
+                self.ws_anim_speed_spin.set_value(float(self.ws_anim_cfg["speed"]))
+            if self.ws_grad_split_spin is not None:
+                self.ws_grad_split_spin.set_value(float(self.ws_grad_cfg["split_idx"]))
+            if self.ws_grad_fade_spin is not None:
+                self.ws_grad_fade_spin.set_value(float(self.ws_grad_cfg["fade_px"]))
+            if self.ws_grad_c1_r_spin is not None:
+                self.ws_grad_c1_r_spin.set_value(float(self.ws_grad_cfg["c1_r"]))
+            if self.ws_grad_c1_g_spin is not None:
+                self.ws_grad_c1_g_spin.set_value(float(self.ws_grad_cfg["c1_g"]))
+            if self.ws_grad_c1_b_spin is not None:
+                self.ws_grad_c1_b_spin.set_value(float(self.ws_grad_cfg["c1_b"]))
+            if self.ws_grad_c2_r_spin is not None:
+                self.ws_grad_c2_r_spin.set_value(float(self.ws_grad_cfg["c2_r"]))
+            if self.ws_grad_c2_g_spin is not None:
+                self.ws_grad_c2_g_spin.set_value(float(self.ws_grad_cfg["c2_g"]))
+            if self.ws_grad_c2_b_spin is not None:
+                self.ws_grad_c2_b_spin.set_value(float(self.ws_grad_cfg["c2_b"]))
         finally:
             self.suppress_ws_events = False
         supported = (self.ws_supported is not False)
@@ -2431,6 +2645,16 @@ class CalibApp(Gtk.Application):
             self.ws_r_spin,
             self.ws_g_spin,
             self.ws_b_spin,
+            self.ws_anim_combo,
+            self.ws_anim_speed_spin,
+            self.ws_grad_split_spin,
+            self.ws_grad_fade_spin,
+            self.ws_grad_c1_r_spin,
+            self.ws_grad_c1_g_spin,
+            self.ws_grad_c1_b_spin,
+            self.ws_grad_c2_r_spin,
+            self.ws_grad_c2_g_spin,
+            self.ws_grad_c2_b_spin,
         ):
             if w is not None:
                 w.set_sensitive(supported)
@@ -2447,7 +2671,10 @@ class CalibApp(Gtk.Application):
             f"on={int(bool(self.ws_cfg['enabled']))} "
             f"br={int(self.ws_cfg['brightness'])} "
             f"rgb=({int(self.ws_cfg['r'])},{int(self.ws_cfg['g'])},{int(self.ws_cfg['b'])}) "
-            f"len={int(self.ws_cfg.get('strip_len', 0))}"
+            f"len={int(self.ws_cfg.get('strip_len', 0))} "
+            f"anim={WS_ANIM_ID_TO_NAME.get(int(self.ws_anim_cfg['mode']), self.ws_anim_cfg['mode'])} "
+            f"speed={int(self.ws_anim_cfg['speed'])} "
+            f"grad(split={int(self.ws_grad_cfg['split_idx'])},fade={int(self.ws_grad_cfg['fade_px'])})"
         )
 
     def action_switch_device(self):
@@ -2643,6 +2870,8 @@ class CalibApp(Gtk.Application):
 
     def action_ws_get_locked(self):
         st = self.client.ws_get_state()
+        anim = self.client.ws_get_anim()
+        grad = self.client.ws_get_gradient()
         self.ws_supported = True
         self.ws_cfg["enabled"] = bool(st["enabled"])
         self.ws_cfg["brightness"] = int(st["brightness"])
@@ -2650,11 +2879,25 @@ class CalibApp(Gtk.Application):
         self.ws_cfg["g"] = int(st["g"])
         self.ws_cfg["b"] = int(st["b"])
         self.ws_cfg["strip_len"] = int(st["strip_len"])
+        self.ws_anim_cfg["mode"] = int(anim["mode"])
+        self.ws_anim_cfg["speed"] = int(anim["speed"])
+        self.ws_grad_cfg["split_idx"] = int(grad["split_idx"])
+        self.ws_grad_cfg["fade_px"] = int(grad["fade_px"])
+        c1r, c1g, c1b = rgb565_to_rgb888(int(grad["color1_rgb565"]))
+        c2r, c2g, c2b = rgb565_to_rgb888(int(grad["color2_rgb565"]))
+        self.ws_grad_cfg["c1_r"] = c1r
+        self.ws_grad_cfg["c1_g"] = c1g
+        self.ws_grad_cfg["c1_b"] = c1b
+        self.ws_grad_cfg["c2_r"] = c2r
+        self.ws_grad_cfg["c2_g"] = c2g
+        self.ws_grad_cfg["c2_b"] = c2b
         GLib.idle_add(self.update_ws_widgets)
         self.log(
             "WS state refreshed "
             f"on={int(self.ws_cfg['enabled'])} br={self.ws_cfg['brightness']} "
-            f"rgb=({self.ws_cfg['r']},{self.ws_cfg['g']},{self.ws_cfg['b']}) len={self.ws_cfg['strip_len']}"
+            f"rgb=({self.ws_cfg['r']},{self.ws_cfg['g']},{self.ws_cfg['b']}) len={self.ws_cfg['strip_len']} "
+            f"anim={self.ws_anim_cfg['mode']}/{self.ws_anim_cfg['speed']} "
+            f"grad={self.ws_grad_cfg['split_idx']}/{self.ws_grad_cfg['fade_px']}"
         )
 
     def action_ws_get_optional_locked(self):
@@ -2677,13 +2920,15 @@ class CalibApp(Gtk.Application):
             raise RuntimeError("WS2812 control is not supported by current firmware")
 
         def _apply_locked():
-            return self.client.ws_set_all(
+            st = self.client.ws_set_all(
                 bool(self.ws_cfg["enabled"]),
                 int(self.ws_cfg["brightness"]),
                 int(self.ws_cfg["r"]),
                 int(self.ws_cfg["g"]),
                 int(self.ws_cfg["b"]),
             )
+            self.client.ws_set_anim(WS_ANIM_NAME_TO_ID["static"], int(self.ws_anim_cfg["speed"]))
+            return st
 
         st = self.with_lock(_apply_locked, min_timeout=CMD_TIMEOUT_SHORT)
         self.ws_cfg["enabled"] = bool(st["enabled"])
@@ -2697,6 +2942,72 @@ class CalibApp(Gtk.Application):
             "WS applied "
             f"on={int(self.ws_cfg['enabled'])} br={self.ws_cfg['brightness']} "
             f"rgb=({self.ws_cfg['r']},{self.ws_cfg['g']},{self.ws_cfg['b']})"
+        )
+
+    def action_ws_anim_get(self):
+        if self.ws_supported is False:
+            raise RuntimeError("WS2812 control is not supported by current firmware")
+
+        info = self.with_lock(self.client.ws_get_anim, min_timeout=CMD_TIMEOUT_SHORT)
+        self.ws_anim_cfg["mode"] = int(info["mode"])
+        self.ws_anim_cfg["speed"] = int(info["speed"])
+        GLib.idle_add(self.update_ws_widgets)
+        self.log(f"WS anim refreshed mode={info['mode_name']}({info['mode']}) speed={info['speed']}")
+
+    def action_ws_anim_apply(self):
+        if self.ws_supported is False:
+            raise RuntimeError("WS2812 control is not supported by current firmware")
+
+        info = self.with_lock(
+            lambda: self.client.ws_set_anim(int(self.ws_anim_cfg["mode"]), int(self.ws_anim_cfg["speed"])),
+            min_timeout=CMD_TIMEOUT_SHORT,
+        )
+        self.ws_anim_cfg["mode"] = int(info["mode"])
+        self.ws_anim_cfg["speed"] = int(info["speed"])
+        GLib.idle_add(self.update_ws_widgets)
+        self.log(f"WS anim applied mode={info['mode_name']}({info['mode']}) speed={info['speed']}")
+
+    def action_ws_grad_get(self):
+        if self.ws_supported is False:
+            raise RuntimeError("WS2812 control is not supported by current firmware")
+
+        info = self.with_lock(self.client.ws_get_gradient, min_timeout=CMD_TIMEOUT_SHORT)
+        self.ws_grad_cfg["split_idx"] = int(info["split_idx"])
+        self.ws_grad_cfg["fade_px"] = int(info["fade_px"])
+        c1r, c1g, c1b = rgb565_to_rgb888(int(info["color1_rgb565"]))
+        c2r, c2g, c2b = rgb565_to_rgb888(int(info["color2_rgb565"]))
+        self.ws_grad_cfg["c1_r"] = c1r
+        self.ws_grad_cfg["c1_g"] = c1g
+        self.ws_grad_cfg["c1_b"] = c1b
+        self.ws_grad_cfg["c2_r"] = c2r
+        self.ws_grad_cfg["c2_g"] = c2g
+        self.ws_grad_cfg["c2_b"] = c2b
+        GLib.idle_add(self.update_ws_widgets)
+        self.log(
+            f"WS gradient refreshed split={info['split_idx']} fade={info['fade_px']} "
+            f"c1=0x{int(info['color1_rgb565']):04X} c2=0x{int(info['color2_rgb565']):04X}"
+        )
+
+    def action_ws_grad_apply(self):
+        if self.ws_supported is False:
+            raise RuntimeError("WS2812 control is not supported by current firmware")
+
+        c1 = rgb888_to_rgb565(self.ws_grad_cfg["c1_r"], self.ws_grad_cfg["c1_g"], self.ws_grad_cfg["c1_b"])
+        c2 = rgb888_to_rgb565(self.ws_grad_cfg["c2_r"], self.ws_grad_cfg["c2_g"], self.ws_grad_cfg["c2_b"])
+        info = self.with_lock(
+            lambda: self.client.ws_set_gradient(
+                int(self.ws_grad_cfg["split_idx"]),
+                int(self.ws_grad_cfg["fade_px"]),
+                int(c1),
+                int(c2),
+            ),
+            min_timeout=CMD_TIMEOUT_SHORT,
+        )
+        self.ws_anim_cfg["mode"] = WS_ANIM_NAME_TO_ID.get("gradient", 5)
+        GLib.idle_add(self.update_ws_widgets)
+        self.log(
+            f"WS gradient applied split={info['split_idx']} fade={info['fade_px']} "
+            f"c1=0x{int(info['color1_rgb565']):04X} c2=0x{int(info['color2_rgb565']):04X}"
         )
 
     def action_ws_off(self):

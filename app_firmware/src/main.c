@@ -385,6 +385,40 @@ static void App_SendWsState(void)
     APP_CAN_SendFrame(frame, 8);
 }
 
+static void App_SendWsAnim(void)
+{
+    ws2812_anim_t anim = {0};
+    uint8_t frame[8] = {0};
+
+    WS2812_GetAnim(&anim);
+    frame[0] = 0x00;
+    frame[1] = APP_FRAME_WS_ANIM;
+    frame[2] = anim.mode;
+    frame[3] = anim.speed;
+    frame[4] = 0;
+    frame[5] = 0;
+    frame[6] = 0;
+    frame[7] = 0;
+    APP_CAN_SendFrame(frame, 8);
+}
+
+static void App_SendWsGradient(void)
+{
+    ws2812_gradient_t cfg = {0};
+    uint8_t frame[8] = {0};
+
+    WS2812_GetGradient(&cfg);
+    frame[0] = 0x00;
+    frame[1] = APP_FRAME_WS_GRADIENT;
+    frame[2] = cfg.split_idx;
+    frame[3] = cfg.fade_px;
+    frame[4] = (uint8_t)(cfg.color1_rgb565 & 0xFFU);
+    frame[5] = (uint8_t)(cfg.color1_rgb565 >> 8);
+    frame[6] = (uint8_t)(cfg.color2_rgb565 & 0xFFU);
+    frame[7] = (uint8_t)(cfg.color2_rgb565 >> 8);
+    APP_CAN_SendFrame(frame, 8);
+}
+
 static app_status_t App_MapCalibError(int err)
 {
     switch (err) {
@@ -791,10 +825,12 @@ static void App_HandleCommand(const uint8_t *data, uint8_t len)
             APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x52);
             break;
         }
+        WS2812_SetAnim(WS2812_ANIM_STATIC, 120U);
         WS2812_SetColor(data[1], data[2], data[3]);
         WS2812_Apply();
         APP_CAN_SendStatus(APP_STATUS_OK, 0x52);
         App_SendWsState();
+        App_SendWsAnim();
         break;
 
     case APP_CMD_WS_SET_ALL:
@@ -802,17 +838,59 @@ static void App_HandleCommand(const uint8_t *data, uint8_t len)
             APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x53);
             break;
         }
+        WS2812_SetAnim(WS2812_ANIM_STATIC, 120U);
         WS2812_SetEnabled(data[1] ? 1U : 0U);
         WS2812_SetBrightness(data[2]);
         WS2812_SetColor(data[3], data[4], data[5]);
         WS2812_Apply();
         APP_CAN_SendStatus(APP_STATUS_OK, 0x53);
         App_SendWsState();
+        App_SendWsAnim();
         break;
 
     case APP_CMD_WS_GET_STATE:
         APP_CAN_SendStatus(APP_STATUS_OK, 0x54);
         App_SendWsState();
+        App_SendWsAnim();
+        break;
+
+    case APP_CMD_WS_SET_ANIM:
+        if (len < 3U) {
+            APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x55);
+            break;
+        }
+        WS2812_SetAnim(data[1], data[2]);
+        WS2812_Apply();
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x55);
+        App_SendWsAnim();
+        break;
+
+    case APP_CMD_WS_GET_ANIM:
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x56);
+        App_SendWsAnim();
+        break;
+
+    case APP_CMD_WS_SET_GRADIENT:
+        if (len < 7U) {
+            APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x57);
+            break;
+        }
+        WS2812_SetGradient(
+            data[1],
+            data[2],
+            (uint16_t)data[3] | ((uint16_t)data[4] << 8),
+            (uint16_t)data[5] | ((uint16_t)data[6] << 8)
+        );
+        WS2812_SetAnim(WS2812_ANIM_GRADIENT, 0U);
+        WS2812_Apply();
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x57);
+        App_SendWsAnim();
+        App_SendWsGradient();
+        break;
+
+    case APP_CMD_WS_GET_GRADIENT:
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x58);
+        App_SendWsGradient();
         break;
 
     case APP_CMD_CALIB_GET:
@@ -949,6 +1027,7 @@ int main(void)
     while (1) {
         now = HAL_GetTick();
         Led_Service(now);
+        WS2812_Service(now);
 
         while (APP_CAN_TryRecv(rx_data, &rx_len)) {
             App_HandleCommand(rx_data, rx_len);
