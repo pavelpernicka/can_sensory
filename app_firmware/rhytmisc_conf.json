@@ -7,7 +7,7 @@
     "beat_quantize": true
   },
   "devices": {
-    "3": {
+    "2": {
       "event_source": "hardware",
       "exclude_from_beat_quantize": false,
       "note_map": [60, 61, 63, 65, 66, 68],
@@ -33,7 +33,7 @@
         "preset": 0
       }
     },
-    "2": {
+    "3": {
       "event_source": "hardware",
       "exclude_from_beat_quantize": false,
       "note_map": [60, 61, 63, 65, 66, 68],
@@ -52,7 +52,7 @@
         "chorus": 10
       },
       "instrument": {
-        "soundfont": "../../sounds/organ.sf2",
+        "soundfont": "../../sounds/maple.sf2",
         "fade_out_on_sector_change": true,
         "bank": 0,
         "preset": 0

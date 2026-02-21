@@ -44,6 +44,7 @@ SRCS += \
   $(CUBE_DIR)/Drivers/STM32L4xx_HAL_Driver/Src/stm32l4xx_hal_pwr.c \
   $(CUBE_DIR)/Drivers/STM32L4xx_HAL_Driver/Src/stm32l4xx_hal_pwr_ex.c \
   $(CUBE_DIR)/Drivers/STM32L4xx_HAL_Driver/Src/stm32l4xx_hal_can.c \
+  $(CUBE_DIR)/Drivers/STM32L4xx_HAL_Driver/Src/stm32l4xx_hal_spi.c \
   $(CUBE_DIR)/Drivers/STM32L4xx_HAL_Driver/Src/stm32l4xx_hal_i2c.c \
   $(CUBE_DIR)/Drivers/STM32L4xx_HAL_Driver/Src/stm32l4xx_hal_i2c_ex.c \
   $(CUBE_DIR)/Drivers/CMSIS/Device/ST/STM32L4xx/Source/Templates/system_stm32l4xx.c

@@ -9,6 +9,7 @@
 #define HAL_FLASH_MODULE_ENABLED
 #define HAL_CAN_MODULE_ENABLED
 #define HAL_I2C_MODULE_ENABLED
+#define HAL_SPI_MODULE_ENABLED
 #define HAL_DMA_MODULE_ENABLED
 #define HAL_PWR_MODULE_ENABLED
 
@@ -66,6 +67,10 @@
 #include "stm32l4xx_hal_i2c_ex.h"
 #endif
 
+#ifdef HAL_SPI_MODULE_ENABLED
+#include "stm32l4xx_hal_spi.h"
+#endif
+
 #ifdef HAL_PWR_MODULE_ENABLED
 #include "stm32l4xx_hal_pwr.h"
 #include "stm32l4xx_hal_pwr_ex.h"
@@ -74,4 +79,3 @@
 #ifndef assert_param
 #define assert_param(expr) ((void)0U)
 #endif
-

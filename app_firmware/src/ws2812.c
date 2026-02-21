@@ -2,6 +2,14 @@
 
 #include <string.h>
 
+#define WS2812_SPI_INSTANCE            SPI1
+#define WS2812_SPI_GPIO_AF             GPIO_AF5_SPI1
+#define WS2812_SYM_0                   0x18U  /* 11000 */
+#define WS2812_SYM_1                   0x1CU  /* 11100 */
+#define WS2812_RESET_BYTES             32U
+#define WS2812_BYTES_PER_LED           15U    /* 24 bits * 5 encoded bits / 8 */
+#define WS2812_TX_MAX_BYTES            ((APP_WS2812_STRIP_LEN * WS2812_BYTES_PER_LED) + WS2812_RESET_BYTES)
+
 typedef struct {
     uint8_t enabled;
     uint8_t brightness;
@@ -11,73 +19,36 @@ typedef struct {
 } ws2812_runtime_t;
 
 static ws2812_runtime_t g_ws;
+static SPI_HandleTypeDef g_hspi;
+static uint8_t g_spi_ready;
+static uint8_t g_tx_buf[WS2812_TX_MAX_BYTES];
 
-static uint32_t ws_cycles_bit;
-static uint32_t ws_cycles_t0h;
-static uint32_t ws_cycles_t1h;
-
-static void WS2812_EnableCycleCounter(void)
+static void WS2812_PackSym5(uint8_t sym, uint16_t *bit_pos)
 {
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-}
-
-static inline uint32_t WS2812_CycleNow(void)
-{
-    return DWT->CYCCNT;
-}
-
-static inline void WS2812_WaitUntil(uint32_t deadline)
-{
-    while ((int32_t)(WS2812_CycleNow() - deadline) < 0) {
+    for (uint8_t mask = 0x10U; mask != 0U; mask >>= 1U) {
+        uint16_t p = *bit_pos;
+        uint16_t byte_i = (uint16_t)(p >> 3);
+        uint8_t bit_i = (uint8_t)(7U - (p & 7U));
+        if (sym & mask) {
+            g_tx_buf[byte_i] |= (uint8_t)(1U << bit_i);
+        }
+        *bit_pos = (uint16_t)(p + 1U);
     }
 }
 
-static inline void WS2812_PinSet(void)
-{
-    APP_WS2812_GPIO_PORT->BSRR = APP_WS2812_PIN;
-}
-
-static inline void WS2812_PinReset(void)
-{
-    APP_WS2812_GPIO_PORT->BSRR = (uint32_t)APP_WS2812_PIN << 16U;
-}
-
-static void WS2812_SendBit(uint8_t bit)
-{
-    uint32_t t0 = WS2812_CycleNow();
-    uint32_t hi_deadline = t0 + (bit ? ws_cycles_t1h : ws_cycles_t0h);
-    uint32_t bit_deadline = t0 + ws_cycles_bit;
-
-    WS2812_PinSet();
-    WS2812_WaitUntil(hi_deadline);
-    WS2812_PinReset();
-    WS2812_WaitUntil(bit_deadline);
-}
-
-static void WS2812_SendByte(uint8_t byte)
+static void WS2812_PackByte(uint8_t value, uint16_t *bit_pos)
 {
     for (uint8_t mask = 0x80U; mask != 0U; mask >>= 1U) {
-        WS2812_SendBit((byte & mask) ? 1U : 0U);
+        WS2812_PackSym5((value & mask) ? WS2812_SYM_1 : WS2812_SYM_0, bit_pos);
     }
-}
-
-static void WS2812_ResetLatch(void)
-{
-    uint32_t cycles_per_us = HAL_RCC_GetHCLKFreq() / 1000000U;
-    uint32_t t0 = WS2812_CycleNow();
-    uint32_t latch_cycles = cycles_per_us * 90U;
-
-    WS2812_PinReset();
-    WS2812_WaitUntil(t0 + latch_cycles);
 }
 
 void WS2812_Init(void)
 {
     GPIO_InitTypeDef gpio = {0};
-    uint32_t hclk_hz;
 
     memset(&g_ws, 0, sizeof(g_ws));
+    memset(&g_hspi, 0, sizeof(g_hspi));
     g_ws.enabled = 0U;
     g_ws.brightness = 64U;
     g_ws.r = 255U;
@@ -85,30 +56,31 @@ void WS2812_Init(void)
     g_ws.b = 255U;
 
     __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_SPI1_CLK_ENABLE();
 
     gpio.Pin = APP_WS2812_PIN;
-    gpio.Mode = GPIO_MODE_OUTPUT_PP;
+    gpio.Mode = GPIO_MODE_AF_PP;
     gpio.Pull = GPIO_NOPULL;
     gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    gpio.Alternate = WS2812_SPI_GPIO_AF;
     HAL_GPIO_Init(APP_WS2812_GPIO_PORT, &gpio);
 
-    WS2812_EnableCycleCounter();
+    g_hspi.Instance = WS2812_SPI_INSTANCE;
+    g_hspi.Init.Mode = SPI_MODE_MASTER;
+    g_hspi.Init.Direction = SPI_DIRECTION_2LINES;
+    g_hspi.Init.DataSize = SPI_DATASIZE_8BIT;
+    g_hspi.Init.CLKPolarity = SPI_POLARITY_LOW;
+    g_hspi.Init.CLKPhase = SPI_PHASE_1EDGE;
+    g_hspi.Init.NSS = SPI_NSS_SOFT;
+    g_hspi.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4; /* 16MHz / 4 = 4MHz */
+    g_hspi.Init.FirstBit = SPI_FIRSTBIT_MSB;
+    g_hspi.Init.TIMode = SPI_TIMODE_DISABLE;
+    g_hspi.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+    g_hspi.Init.CRCPolynomial = 7U;
+    g_hspi.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
+    g_hspi.Init.NSSPMode = SPI_NSS_PULSE_DISABLE;
 
-    hclk_hz = HAL_RCC_GetHCLKFreq();
-    ws_cycles_bit = (hclk_hz + 400000U) / 800000U;      /* 1.25us */
-    ws_cycles_t0h = (hclk_hz + 1250000U) / 2500000U;    /* 0.40us */
-    ws_cycles_t1h = (hclk_hz + 625000U) / 1250000U;     /* 0.80us */
-
-    if (ws_cycles_bit < 8U) {
-        ws_cycles_bit = 8U;
-    }
-    if (ws_cycles_t0h < 2U) {
-        ws_cycles_t0h = 2U;
-    }
-    if (ws_cycles_t1h <= ws_cycles_t0h) {
-        ws_cycles_t1h = ws_cycles_t0h + 2U;
-    }
-
+    g_spi_ready = (HAL_SPI_Init(&g_hspi) == HAL_OK) ? 1U : 0U;
     WS2812_Apply();
 }
 
@@ -145,11 +117,15 @@ void WS2812_GetState(ws2812_state_t *state)
 
 void WS2812_Apply(void)
 {
-    uint32_t primask = __get_PRIMASK();
-    uint16_t n = APP_WS2812_STRIP_LEN;
+    uint16_t bit_pos = 0U;
+    uint16_t tx_len;
     uint8_t r = 0U;
     uint8_t g = 0U;
     uint8_t b = 0U;
+
+    if (!g_spi_ready) {
+        return;
+    }
 
     if (g_ws.enabled) {
         uint16_t br = (uint16_t)g_ws.brightness;
@@ -158,15 +134,19 @@ void WS2812_Apply(void)
         b = (uint8_t)(((uint16_t)g_ws.b * br + 127U) / 255U);
     }
 
-    __disable_irq();
-    for (uint16_t i = 0; i < n; ++i) {
+    memset(g_tx_buf, 0, sizeof(g_tx_buf));
+    for (uint16_t i = 0; i < APP_WS2812_STRIP_LEN; ++i) {
         /* WS2812 expects GRB order. */
-        WS2812_SendByte(g);
-        WS2812_SendByte(r);
-        WS2812_SendByte(b);
+        WS2812_PackByte(g, &bit_pos);
+        WS2812_PackByte(r, &bit_pos);
+        WS2812_PackByte(b, &bit_pos);
     }
-    WS2812_ResetLatch();
-    if (!primask) {
-        __enable_irq();
+
+    tx_len = (uint16_t)(bit_pos >> 3);
+    tx_len = (uint16_t)(tx_len + WS2812_RESET_BYTES);
+    if (tx_len > sizeof(g_tx_buf)) {
+        tx_len = sizeof(g_tx_buf);
     }
+
+    HAL_SPI_Transmit(&g_hspi, g_tx_buf, tx_len, 20U);
 }
