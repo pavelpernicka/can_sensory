@@ -24,6 +24,8 @@ CMD_WS_SET_SECTOR_MODE = 0x5B
 CMD_WS_GET_SECTOR_MODE = 0x5C
 CMD_WS_SET_SECTOR_ZONE = 0x5D
 CMD_WS_GET_SECTOR_ZONE = 0x5E
+CMD_WS_SET_LENGTH = 0x5F
+CMD_WS_GET_LENGTH = 0x60
 CMD_HMC_SET_CFG = 0x6E
 CMD_HMC_GET_CFG = 0x6F
 CMD_SET_INTERVAL = 0x70
@@ -66,6 +68,7 @@ FRAME_WS_GRADIENT = 0x49
 FRAME_WS_SECTOR_COLOR = 0x4A
 FRAME_WS_SECTOR_MODE = 0x4B
 FRAME_WS_SECTOR_ZONE = 0x4C
+FRAME_WS_LENGTH = 0x4D
 
 EVENT_NAMES = {
     1: "SECTOR_ACTIVATED",
@@ -125,6 +128,7 @@ FRAME_TYPES = {
     FRAME_WS_SECTOR_COLOR,
     FRAME_WS_SECTOR_MODE,
     FRAME_WS_SECTOR_ZONE,
+    FRAME_WS_LENGTH,
 }
 
 CMD_REPLY_FRAME_TYPES = {
@@ -144,6 +148,7 @@ CMD_REPLY_FRAME_TYPES = {
     FRAME_WS_SECTOR_COLOR,
     FRAME_WS_SECTOR_MODE,
     FRAME_WS_SECTOR_ZONE,
+    FRAME_WS_LENGTH,
 }
 
 WS_ANIM_NAME_TO_ID = {
@@ -611,20 +616,17 @@ class AppCanClient:
         frame = self.wait_frame(lambda d: len(d) >= 7 and d[0] == 0 and d[1] == FRAME_WS_SECTOR_MODE)
         return parse_ws_sector_mode_frame(frame)
 
-    def ws_set_sector_zone(self, idx: int, start_led: int, end_led: int, sector: int, color_rgb565: int) -> dict:
+    def ws_set_sector_zone(self, idx: int, pos_led: int, color_rgb565: int) -> dict:
         if idx < 1 or idx > 32:
             raise ValueError("zone index must be 1..32")
-        for name, val in (("start_led", start_led), ("end_led", end_led), ("sector", sector)):
-            if val < 0 or val > 255:
-                raise ValueError(f"{name} must be 0..255")
+        if pos_led < 0 or pos_led > 255:
+            raise ValueError("pos_led must be 0..255 (0 disables stop)")
         if color_rgb565 < 0 or color_rgb565 > 0xFFFF:
             raise ValueError("color must be RGB565 (0..65535)")
         self.send_command(bytes([
             CMD_WS_SET_SECTOR_ZONE,
             idx & 0xFF,
-            start_led & 0xFF,
-            end_led & 0xFF,
-            sector & 0xFF,
+            pos_led & 0xFF,
             color_rgb565 & 0xFF,
             (color_rgb565 >> 8) & 0xFF,
         ]))
@@ -662,6 +664,20 @@ class AppCanClient:
         if not out:
             raise TimeoutError("Timeout waiting for WS sector zone frame(s)")
         return [out[k] for k in sorted(out.keys())]
+
+    def ws_set_length(self, strip_len: int) -> dict:
+        if strip_len < 1 or strip_len > 255:
+            raise ValueError("strip length must be 1..255")
+        self.send_command(bytes([CMD_WS_SET_LENGTH, strip_len & 0xFF]))
+        self.wait_status(expected_extra=0x5F)
+        frame = self.wait_frame(lambda d: len(d) >= 4 and d[0] == 0 and d[1] == FRAME_WS_LENGTH)
+        return parse_ws_length_frame(frame)
+
+    def ws_get_length(self) -> dict:
+        self.send_command(bytes([CMD_WS_GET_LENGTH]))
+        self.wait_status(expected_extra=0x60)
+        frame = self.wait_frame(lambda d: len(d) >= 4 and d[0] == 0 and d[1] == FRAME_WS_LENGTH)
+        return parse_ws_length_frame(frame)
 
     def aht20_read(self) -> dict:
         self.send_command(bytes([CMD_AHT20_READ]))
@@ -955,10 +971,17 @@ def parse_ws_sector_mode_frame(data: bytes) -> dict:
 def parse_ws_sector_zone_frame(data: bytes) -> dict:
     return {
         "idx": int(data[2]),
-        "start_led": int(data[3]),
-        "end_led": int(data[4]),
-        "sector": int(data[5]),
-        "color_rgb565": int.from_bytes(data[6:8], "little"),
+        "pos_led": int(data[3]),
+        "color_rgb565": int.from_bytes(data[4:6], "little"),
+        "strip_len": int(data[6]) if len(data) >= 7 else 0,
+        "max_strip_len": int(data[7]) if len(data) >= 8 else 0,
+    }
+
+
+def parse_ws_length_frame(data: bytes) -> dict:
+    return {
+        "strip_len": int(data[2]),
+        "max_strip_len": int(data[3]) if len(data) >= 4 else 0,
     }
 
 
@@ -1184,9 +1207,12 @@ def decode_frame(data: bytes) -> str:
         if subtype == FRAME_WS_SECTOR_ZONE and len(data) >= 8:
             parsed = parse_ws_sector_zone_frame(data)
             return (
-                f"WS_SECTOR_ZONE idx={parsed['idx']} range={parsed['start_led']}..{parsed['end_led']} "
-                f"sector={parsed['sector']} color=0x{parsed['color_rgb565']:04X}"
+                f"WS_SECTOR_ZONE idx={parsed['idx']} pos={parsed['pos_led']} "
+                f"color=0x{parsed['color_rgb565']:04X} len={parsed['strip_len']}/{parsed['max_strip_len']}"
             )
+        if subtype == FRAME_WS_LENGTH and len(data) >= 4:
+            parsed = parse_ws_length_frame(data)
+            return f"WS_LENGTH len={parsed['strip_len']} max={parsed['max_strip_len']}"
 
         return f"FRAME subtype=0x{subtype:02X} data={data.hex()}"
 
@@ -1374,10 +1400,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_led.add_argument("--sector-b", type=byte_arg, help="sector color blue 0..255")
     p_led.add_argument("--zone-get", action="store_true", help="Read zone mapping(s)")
     p_led.add_argument("--zone-id", type=int, help="zone index 1..32 (or with --zone-get, 0..32)")
-    p_led.add_argument("--zone-start", type=byte_arg, help="zone start LED index (1-based, 0 disables)")
-    p_led.add_argument("--zone-end", type=byte_arg, help="zone end LED index (1-based, 0 disables)")
-    p_led.add_argument("--zone-sector", type=byte_arg, help="event sector for this zone (0 disables)")
+    p_led.add_argument("--zone-pos", type=byte_arg, help="gradient stop position (1-based, 0 disables)")
     p_led.add_argument("--zone-color", type=rgb565_arg, help="zone color RGB565")
+    p_led.add_argument("--len", type=byte_arg, help="active LED count (1..max)")
+    p_led.add_argument("--len-get", action="store_true", help="Read active/max LED count")
 
     p_mon = sub.add_parser("monitor", help="Live decode of incoming app frames")
     p_mon.add_argument("--duration", type=float, default=0.0, help="Seconds to monitor (0 = forever)")
@@ -1520,10 +1546,10 @@ def main() -> int:
             if args.sector_count is not None and (args.sector_count < 1 or args.sector_count > 255):
                 raise ValueError("--sector-count must be 1..255")
 
-            has_zone = any(v is not None for v in (args.zone_start, args.zone_end, args.zone_sector, args.zone_color))
+            has_zone = any(v is not None for v in (args.zone_pos, args.zone_color))
             if has_zone:
-                if not all(v is not None for v in (args.zone_start, args.zone_end, args.zone_sector, args.zone_color)):
-                    raise ValueError("set all of --zone-start --zone-end --zone-sector --zone-color together")
+                if not all(v is not None for v in (args.zone_pos, args.zone_color)):
+                    raise ValueError("set both --zone-pos and --zone-color together")
                 if args.zone_id is None:
                     raise ValueError("--zone-id is required when setting zone fields")
                 if args.zone_id < 1 or args.zone_id > 32:
@@ -1576,9 +1602,19 @@ def main() -> int:
                 zones = client.ws_get_sector_zone(zone_idx)
                 for z in zones:
                     print(
-                        f"LED_ZONE idx={z['idx']} range={z['start_led']}..{z['end_led']} "
-                        f"sector={z['sector']} color=0x{z['color_rgb565']:04X}"
+                        f"LED_ZONE idx={z['idx']} pos={z['pos_led']} color=0x{z['color_rgb565']:04X} "
+                        f"len={z.get('strip_len',0)}/{z.get('max_strip_len',0)}"
                     )
+                return 0
+
+            if args.len_get:
+                st = client.ws_get_length()
+                print(f"LED_LENGTH len={st['strip_len']} max={st['max_strip_len']}")
+                return 0
+
+            if args.len is not None:
+                st = client.ws_set_length(int(args.len))
+                print(f"LED_LENGTH_SET OK len={st['strip_len']} max={st['max_strip_len']}")
                 return 0
 
             has_sector_mode = (
@@ -1606,14 +1642,12 @@ def main() -> int:
             if has_zone:
                 z = client.ws_set_sector_zone(
                     int(args.zone_id),
-                    int(args.zone_start),
-                    int(args.zone_end),
-                    int(args.zone_sector),
+                    int(args.zone_pos),
                     int(args.zone_color),
                 )
                 print(
-                    f"LED_ZONE_SET OK idx={z['idx']} range={z['start_led']}..{z['end_led']} "
-                    f"sector={z['sector']} color=0x{z['color_rgb565']:04X}"
+                    f"LED_ZONE_SET OK idx={z['idx']} pos={z['pos_led']} color=0x{z['color_rgb565']:04X} "
+                    f"len={z.get('strip_len',0)}/{z.get('max_strip_len',0)}"
                 )
                 return 0
 

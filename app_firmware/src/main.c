@@ -459,16 +459,33 @@ static void App_SendWsSectorZone(uint8_t idx)
 {
     ws2812_sector_zone_t cfg = {0};
     uint8_t frame[8] = {0};
+    uint8_t strip_len = 0U;
+    uint8_t max_strip_len = 0U;
 
     WS2812_GetSectorZone(idx, &cfg);
+    WS2812_GetStripLength(&strip_len, &max_strip_len);
     frame[0] = 0x00;
     frame[1] = APP_FRAME_WS_SECTOR_ZONE;
     frame[2] = cfg.idx;
-    frame[3] = cfg.start_led;
-    frame[4] = cfg.end_led;
-    frame[5] = cfg.sector;
-    frame[6] = (uint8_t)(cfg.color_rgb565 & 0xFFU);
-    frame[7] = (uint8_t)(cfg.color_rgb565 >> 8);
+    frame[3] = cfg.pos_led;
+    frame[4] = (uint8_t)(cfg.color_rgb565 & 0xFFU);
+    frame[5] = (uint8_t)(cfg.color_rgb565 >> 8);
+    frame[6] = strip_len;
+    frame[7] = max_strip_len;
+    APP_CAN_SendFrame(frame, 8);
+}
+
+static void App_SendWsLength(void)
+{
+    uint8_t frame[8] = {0};
+    uint8_t strip_len = 0U;
+    uint8_t max_strip_len = 0U;
+
+    WS2812_GetStripLength(&strip_len, &max_strip_len);
+    frame[0] = 0x00;
+    frame[1] = APP_FRAME_WS_LENGTH;
+    frame[2] = strip_len;
+    frame[3] = max_strip_len;
     APP_CAN_SendFrame(frame, 8);
 }
 
@@ -905,6 +922,7 @@ static void App_HandleCommand(const uint8_t *data, uint8_t len)
         APP_CAN_SendStatus(APP_STATUS_OK, 0x54);
         App_SendWsState();
         App_SendWsAnim();
+        App_SendWsLength();
         break;
 
     case APP_CMD_WS_SET_ANIM:
@@ -990,24 +1008,18 @@ static void App_HandleCommand(const uint8_t *data, uint8_t len)
         break;
 
     case APP_CMD_WS_SET_SECTOR_ZONE:
-        if (len < 7U || data[1] == 0U || data[1] > WS2812_MAX_ZONES) {
+        if (len < 5U || data[1] == 0U || data[1] > WS2812_MAX_ZONES) {
             APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x5D);
             break;
         }
-        if ((data[2] > APP_WS2812_STRIP_LEN) || (data[3] > APP_WS2812_STRIP_LEN)) {
-            APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x5D);
-            break;
-        }
-        if ((data[2] != 0U) && (data[3] != 0U) && (data[2] > data[3])) {
+        if (data[2] > APP_WS2812_STRIP_LEN) {
             APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x5D);
             break;
         }
         WS2812_SetSectorZone(
             data[1],
             data[2],
-            data[3],
-            data[4],
-            (uint16_t)data[5] | ((uint16_t)data[6] << 8)
+            (uint16_t)data[3] | ((uint16_t)data[4] << 8)
         );
         WS2812_Apply();
         APP_CAN_SendStatus(APP_STATUS_OK, 0x5D);
@@ -1028,6 +1040,23 @@ static void App_HandleCommand(const uint8_t *data, uint8_t len)
         } else {
             App_SendWsSectorZone(sid);
         }
+        break;
+
+    case APP_CMD_WS_SET_LENGTH:
+        if (len < 2U) {
+            APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x5F);
+            break;
+        }
+        WS2812_SetStripLength(data[1]);
+        WS2812_Apply();
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x5F);
+        App_SendWsState();
+        App_SendWsLength();
+        break;
+
+    case APP_CMD_WS_GET_LENGTH:
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x60);
+        App_SendWsLength();
         break;
 
     case APP_CMD_CALIB_GET:

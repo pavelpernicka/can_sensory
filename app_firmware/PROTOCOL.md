@@ -108,7 +108,7 @@ Payload:
   - `2` breathe
   - `3` rainbow
   - `4` wipe
-  - `5` gradient (spatial split/fade pattern)
+  - `5` gradient (multi-stop circular gradient from configured zones/stops)
   - `6` sector-follow (whole strip color follows current event sector with crossfade)
 - `speed`: `0..255` (meaning depends on mode)
 
@@ -137,6 +137,10 @@ Response:
 - status `OK, extra=0x57`
 - `WS_ANIM` frame (`subtype=0x48`) with mode `gradient`
 - `WS_GRADIENT` frame (`subtype=0x49`)
+
+Note:
+- compatibility helper for 2-color gradient
+- internally mapped to first two gradient stops
 
 ### `0x58` `WS_GET_GRADIENT`
 
@@ -193,10 +197,9 @@ Response:
 ### `0x5D` `WS_SET_SECTOR_ZONE`
 
 Payload:
-- `[0x5D, idx, start_led, end_led, sector, color_lo, color_hi]`
+- `[0x5D, idx, pos_led, color_lo, color_hi]`
 - `idx`: `1..32`
-- `start_led/end_led`: 1-based LED range (`0` disables this zone)
-- `sector`: event sector id (`0` disables this zone)
+- `pos_led`: 1-based gradient stop position (`0` disables this stop)
 - `color`: RGB565 (`uint16 LE`)
 
 Response:
@@ -213,6 +216,26 @@ Payload:
 Response:
 - status `OK, extra=0x5E`
 - one or more `WS_SECTOR_ZONE` frame(s) (`subtype=0x4C`)
+
+### `0x5F` `WS_SET_LENGTH`
+
+Payload:
+- `[0x5F, strip_len]`
+- `strip_len`: active LED count (`1..max`)
+
+Response:
+- status `OK, extra=0x5F`
+- `WS_STATE` frame (`subtype=0x47`)
+- `WS_LENGTH` frame (`subtype=0x4D`)
+
+### `0x60` `WS_GET_LENGTH`
+
+Payload:
+- `[0x60]`
+
+Response:
+- status `OK, extra=0x60`
+- `WS_LENGTH` frame (`subtype=0x4D`)
 
 ### `0x6E` `HMC_SET_CFG`
 
@@ -534,10 +557,16 @@ Note:
 ### `0x4C` `WS_SECTOR_ZONE`
 
 - Byte2: zone index (`1..32`)
-- Byte3: start LED index (1-based, `0` = disabled)
-- Byte4: end LED index (1-based)
-- Byte5: event sector id (`0` = disabled)
-- Byte6..7: RGB565 color (`uint16 LE`)
+- Byte3: stop position (1-based, `0` = disabled)
+- Byte4..5: RGB565 color (`uint16 LE`)
+- Byte6: active strip length
+- Byte7: max strip length
+
+### `0x4D` `WS_LENGTH`
+
+- Byte2: active strip length
+- Byte3: max strip length
+- Byte4..7: `0x00`
 
 ### `0x31` `STATUS`
 
