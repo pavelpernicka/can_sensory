@@ -18,6 +18,12 @@ CMD_WS_SET_ANIM = 0x55
 CMD_WS_GET_ANIM = 0x56
 CMD_WS_SET_GRADIENT = 0x57
 CMD_WS_GET_GRADIENT = 0x58
+CMD_WS_SET_SECTOR_COLOR = 0x59
+CMD_WS_GET_SECTOR_COLOR = 0x5A
+CMD_WS_SET_SECTOR_MODE = 0x5B
+CMD_WS_GET_SECTOR_MODE = 0x5C
+CMD_WS_SET_SECTOR_ZONE = 0x5D
+CMD_WS_GET_SECTOR_ZONE = 0x5E
 CMD_HMC_SET_CFG = 0x6E
 CMD_HMC_GET_CFG = 0x6F
 CMD_SET_INTERVAL = 0x70
@@ -57,6 +63,9 @@ FRAME_HMC_CFG = 0x46
 FRAME_WS_STATE = 0x47
 FRAME_WS_ANIM = 0x48
 FRAME_WS_GRADIENT = 0x49
+FRAME_WS_SECTOR_COLOR = 0x4A
+FRAME_WS_SECTOR_MODE = 0x4B
+FRAME_WS_SECTOR_ZONE = 0x4C
 
 EVENT_NAMES = {
     1: "SECTOR_ACTIVATED",
@@ -113,6 +122,9 @@ FRAME_TYPES = {
     FRAME_WS_STATE,
     FRAME_WS_ANIM,
     FRAME_WS_GRADIENT,
+    FRAME_WS_SECTOR_COLOR,
+    FRAME_WS_SECTOR_MODE,
+    FRAME_WS_SECTOR_ZONE,
 }
 
 CMD_REPLY_FRAME_TYPES = {
@@ -129,6 +141,9 @@ CMD_REPLY_FRAME_TYPES = {
     FRAME_WS_STATE,
     FRAME_WS_ANIM,
     FRAME_WS_GRADIENT,
+    FRAME_WS_SECTOR_COLOR,
+    FRAME_WS_SECTOR_MODE,
+    FRAME_WS_SECTOR_ZONE,
 }
 
 WS_ANIM_NAME_TO_ID = {
@@ -138,8 +153,19 @@ WS_ANIM_NAME_TO_ID = {
     "rainbow": 3,
     "wipe": 4,
     "gradient": 5,
+    "sector-follow": 6,
+    "sector_follow": 6,
+    "sector": 6,
 }
-WS_ANIM_ID_TO_NAME = {v: k for k, v in WS_ANIM_NAME_TO_ID.items()}
+WS_ANIM_ID_TO_NAME = {
+    0: "static",
+    1: "blink",
+    2: "breathe",
+    3: "rainbow",
+    4: "wipe",
+    5: "gradient",
+    6: "sector-follow",
+}
 
 CAL_FIELD_NAME_TO_ID = {
     "center_x": 1,
@@ -523,6 +549,120 @@ class AppCanClient:
         frame = self.wait_frame(lambda d: len(d) >= 8 and d[0] == 0 and d[1] == FRAME_WS_GRADIENT)
         return parse_ws_gradient_frame(frame)
 
+    def ws_set_sector_color(self, idx: int, r: int, g: int, b: int) -> dict:
+        if idx < 1 or idx > 8:
+            raise ValueError("sector index must be 1..8")
+        for n, v in (("r", r), ("g", g), ("b", b)):
+            if v < 0 or v > 255:
+                raise ValueError(f"{n} must be 0..255")
+        self.send_command(bytes([CMD_WS_SET_SECTOR_COLOR, idx, r, g, b]))
+        self.wait_status(expected_extra=0x59)
+        frame = self.wait_frame(
+            lambda d: len(d) >= 7 and d[0] == 0 and d[1] == FRAME_WS_SECTOR_COLOR and d[2] == idx
+        )
+        return parse_ws_sector_color_frame(frame)
+
+    def ws_get_sector_color(self, idx: int = 0) -> list[dict]:
+        if idx < 0 or idx > 8:
+            raise ValueError("sector index must be 0..8")
+        self.send_command(bytes([CMD_WS_GET_SECTOR_COLOR, idx]))
+        self.wait_status(expected_extra=0x5A)
+
+        if idx != 0:
+            frame = self.wait_frame(
+                lambda d: len(d) >= 7 and d[0] == 0 and d[1] == FRAME_WS_SECTOR_COLOR and d[2] == idx
+            )
+            return [parse_ws_sector_color_frame(frame)]
+
+        out: dict[int, dict] = {}
+        deadline = time.monotonic() + self.timeout
+        while time.monotonic() < deadline and len(out) < 8:
+            frame = self._next_frame(timeout_s=min(0.05, max(0.0, deadline - time.monotonic())))
+            if frame is None:
+                continue
+            if self.is_status_reply(frame):
+                st = frame[0]
+                if st != STATUS_OK:
+                    raise RuntimeError(
+                        f"Device error: {STATUS_TEXT.get(st, f'0x{st:02X}')} extra=0x{frame[1]:02X}"
+                    )
+                continue
+            if len(frame) < 7 or frame[0] != 0 or frame[1] != FRAME_WS_SECTOR_COLOR:
+                continue
+            parsed = parse_ws_sector_color_frame(frame)
+            out[int(parsed["idx"])] = parsed
+        if not out:
+            raise TimeoutError("Timeout waiting for WS sector color frame(s)")
+        return [out[k] for k in sorted(out.keys())]
+
+    def ws_set_sector_mode(self, enabled: bool, fade_speed: int, sector_count: int) -> dict:
+        if fade_speed < 0 or fade_speed > 255:
+            raise ValueError("fade speed must be 0..255")
+        if sector_count < 1 or sector_count > 255:
+            raise ValueError("sector count must be 1..255")
+        self.send_command(bytes([CMD_WS_SET_SECTOR_MODE, 1 if enabled else 0, fade_speed, sector_count]))
+        self.wait_status(expected_extra=0x5B)
+        frame = self.wait_frame(lambda d: len(d) >= 7 and d[0] == 0 and d[1] == FRAME_WS_SECTOR_MODE)
+        return parse_ws_sector_mode_frame(frame)
+
+    def ws_get_sector_mode(self) -> dict:
+        self.send_command(bytes([CMD_WS_GET_SECTOR_MODE]))
+        self.wait_status(expected_extra=0x5C)
+        frame = self.wait_frame(lambda d: len(d) >= 7 and d[0] == 0 and d[1] == FRAME_WS_SECTOR_MODE)
+        return parse_ws_sector_mode_frame(frame)
+
+    def ws_set_sector_zone(self, idx: int, start_led: int, end_led: int, sector: int, color_rgb565: int) -> dict:
+        if idx < 1 or idx > 32:
+            raise ValueError("zone index must be 1..32")
+        for name, val in (("start_led", start_led), ("end_led", end_led), ("sector", sector)):
+            if val < 0 or val > 255:
+                raise ValueError(f"{name} must be 0..255")
+        if color_rgb565 < 0 or color_rgb565 > 0xFFFF:
+            raise ValueError("color must be RGB565 (0..65535)")
+        self.send_command(bytes([
+            CMD_WS_SET_SECTOR_ZONE,
+            idx & 0xFF,
+            start_led & 0xFF,
+            end_led & 0xFF,
+            sector & 0xFF,
+            color_rgb565 & 0xFF,
+            (color_rgb565 >> 8) & 0xFF,
+        ]))
+        self.wait_status(expected_extra=0x5D)
+        frame = self.wait_frame(lambda d: len(d) >= 8 and d[0] == 0 and d[1] == FRAME_WS_SECTOR_ZONE and d[2] == idx)
+        return parse_ws_sector_zone_frame(frame)
+
+    def ws_get_sector_zone(self, idx: int = 0) -> list[dict]:
+        if idx < 0 or idx > 32:
+            raise ValueError("zone index must be 0..32")
+        self.send_command(bytes([CMD_WS_GET_SECTOR_ZONE, idx & 0xFF]))
+        self.wait_status(expected_extra=0x5E)
+
+        if idx != 0:
+            frame = self.wait_frame(lambda d: len(d) >= 8 and d[0] == 0 and d[1] == FRAME_WS_SECTOR_ZONE and d[2] == idx)
+            return [parse_ws_sector_zone_frame(frame)]
+
+        out: dict[int, dict] = {}
+        deadline = time.monotonic() + self.timeout
+        while time.monotonic() < deadline and len(out) < 32:
+            frame = self._next_frame(timeout_s=min(0.05, max(0.0, deadline - time.monotonic())))
+            if frame is None:
+                continue
+            if self.is_status_reply(frame):
+                st = frame[0]
+                if st != STATUS_OK:
+                    raise RuntimeError(
+                        f"Device error: {STATUS_TEXT.get(st, f'0x{st:02X}')} extra=0x{frame[1]:02X}"
+                    )
+                continue
+            if len(frame) < 8 or frame[0] != 0 or frame[1] != FRAME_WS_SECTOR_ZONE:
+                continue
+            parsed = parse_ws_sector_zone_frame(frame)
+            out[int(parsed["idx"])] = parsed
+        if not out:
+            raise TimeoutError("Timeout waiting for WS sector zone frame(s)")
+        return [out[k] for k in sorted(out.keys())]
+
     def aht20_read(self) -> dict:
         self.send_command(bytes([CMD_AHT20_READ]))
         self.wait_status(expected_extra=0x74)
@@ -791,6 +931,37 @@ def parse_ws_gradient_frame(data: bytes) -> dict:
     }
 
 
+def parse_ws_sector_color_frame(data: bytes) -> dict:
+    return {
+        "idx": int(data[2]),
+        "r": int(data[3]),
+        "g": int(data[4]),
+        "b": int(data[5]),
+        "max_sectors": int(data[6]),
+    }
+
+
+def parse_ws_sector_mode_frame(data: bytes) -> dict:
+    return {
+        "enabled": bool(data[2]),
+        "fade_speed": int(data[3]),
+        "sector_count": int(data[4]),
+        "active_sector": int(data[5]),
+        "target_sector": int(data[6]),
+        "max_zones": int(data[7]) if len(data) >= 8 else 0,
+    }
+
+
+def parse_ws_sector_zone_frame(data: bytes) -> dict:
+    return {
+        "idx": int(data[2]),
+        "start_led": int(data[3]),
+        "end_led": int(data[4]),
+        "sector": int(data[5]),
+        "color_rgb565": int.from_bytes(data[6:8], "little"),
+    }
+
+
 def parse_aht20_meas_frame(data: bytes) -> dict:
     temp_centi = int.from_bytes(data[2:4], "little", signed=True)
     rh_centi = int.from_bytes(data[4:6], "little", signed=False)
@@ -996,6 +1167,27 @@ def decode_frame(data: bytes) -> str:
                 f"c1=0x{parsed['color1_rgb565']:04X} c2=0x{parsed['color2_rgb565']:04X}"
             )
 
+        if subtype == FRAME_WS_SECTOR_COLOR and len(data) >= 7:
+            parsed = parse_ws_sector_color_frame(data)
+            return (
+                f"WS_SECTOR_COLOR idx={parsed['idx']} rgb=({parsed['r']},{parsed['g']},{parsed['b']}) "
+                f"max={parsed['max_sectors']}"
+            )
+
+        if subtype == FRAME_WS_SECTOR_MODE and len(data) >= 7:
+            parsed = parse_ws_sector_mode_frame(data)
+            return (
+                f"WS_SECTOR_MODE on={int(parsed['enabled'])} fade={parsed['fade_speed']} "
+                f"count={parsed['sector_count']} active={parsed['active_sector']} target={parsed['target_sector']} "
+                f"max_zones={parsed['max_zones']}"
+            )
+        if subtype == FRAME_WS_SECTOR_ZONE and len(data) >= 8:
+            parsed = parse_ws_sector_zone_frame(data)
+            return (
+                f"WS_SECTOR_ZONE idx={parsed['idx']} range={parsed['start_led']}..{parsed['end_led']} "
+                f"sector={parsed['sector']} color=0x{parsed['color_rgb565']:04X}"
+            )
+
         return f"FRAME subtype=0x{subtype:02X} data={data.hex()}"
 
     return f"RAW {data.hex()}"
@@ -1104,8 +1296,10 @@ def ws_anim_arg(value: str) -> int:
     if key in WS_ANIM_NAME_TO_ID:
         return WS_ANIM_NAME_TO_ID[key]
     iv = int(value, 0)
-    if iv < 0 or iv > 5:
-        raise argparse.ArgumentTypeError("animation must be static|blink|breathe|rainbow|wipe|gradient or 0..5")
+    if iv < 0 or iv > 6:
+        raise argparse.ArgumentTypeError(
+            "animation must be static|blink|breathe|rainbow|wipe|gradient|sector-follow or 0..6"
+        )
     return iv
 
 
@@ -1160,7 +1354,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_led.add_argument("--r", type=byte_arg, help="red 0..255")
     p_led.add_argument("--g", type=byte_arg, help="green 0..255")
     p_led.add_argument("--b", type=byte_arg, help="blue 0..255")
-    p_led.add_argument("--anim", type=ws_anim_arg, help="static|blink|breathe|rainbow|wipe|gradient or 0..5")
+    p_led.add_argument("--anim", type=ws_anim_arg, help="static|blink|breathe|rainbow|wipe|gradient|sector-follow or 0..6")
     p_led.add_argument("--anim-speed", type=byte_arg, help="animation speed 0..255")
     p_led.add_argument("--anim-get", action="store_true", help="Read animation config")
     p_led.add_argument("--grad-get", action="store_true", help="Read gradient config")
@@ -1168,6 +1362,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_led.add_argument("--grad-fade", type=byte_arg, help="gradient fade half-width in pixels")
     p_led.add_argument("--grad-c1", type=rgb565_arg, help="gradient color1 RGB565 (e.g. 0x001F)")
     p_led.add_argument("--grad-c2", type=rgb565_arg, help="gradient color2 RGB565 (e.g. 0xF800)")
+    p_led.add_argument("--sector-mode-get", action="store_true", help="Read sector-follow mode config")
+    p_led.add_argument("--sector-colors-get", action="store_true", help="Read all sector-follow colors")
+    p_led.add_argument("--sector-on", action="store_true", help="Enable sector-follow mode")
+    p_led.add_argument("--sector-off", action="store_true", help="Disable sector-follow mode")
+    p_led.add_argument("--sector-fade", type=byte_arg, help="sector-follow fade speed 0..255")
+    p_led.add_argument("--sector-count", type=int, help="sector-follow sector count 1..255")
+    p_led.add_argument("--sector-idx", type=int, help="sector color index 1..8")
+    p_led.add_argument("--sector-r", type=byte_arg, help="sector color red 0..255")
+    p_led.add_argument("--sector-g", type=byte_arg, help="sector color green 0..255")
+    p_led.add_argument("--sector-b", type=byte_arg, help="sector color blue 0..255")
+    p_led.add_argument("--zone-get", action="store_true", help="Read zone mapping(s)")
+    p_led.add_argument("--zone-id", type=int, help="zone index 1..32 (or with --zone-get, 0..32)")
+    p_led.add_argument("--zone-start", type=byte_arg, help="zone start LED index (1-based, 0 disables)")
+    p_led.add_argument("--zone-end", type=byte_arg, help="zone end LED index (1-based, 0 disables)")
+    p_led.add_argument("--zone-sector", type=byte_arg, help="event sector for this zone (0 disables)")
+    p_led.add_argument("--zone-color", type=rgb565_arg, help="zone color RGB565")
 
     p_mon = sub.add_parser("monitor", help="Live decode of incoming app frames")
     p_mon.add_argument("--duration", type=float, default=0.0, help="Seconds to monitor (0 = forever)")
@@ -1294,10 +1504,30 @@ def main() -> int:
         if args.cmd == "led":
             if args.on and args.off:
                 raise ValueError("choose only one of --on/--off")
+            if args.sector_on and args.sector_off:
+                raise ValueError("choose only one of --sector-on/--sector-off")
 
             has_rgb = any(v is not None for v in (args.r, args.g, args.b))
             if has_rgb and not all(v is not None for v in (args.r, args.g, args.b)):
                 raise ValueError("set all of --r --g --b together")
+            has_sector_rgb = any(v is not None for v in (args.sector_r, args.sector_g, args.sector_b))
+            if has_sector_rgb and not all(v is not None for v in (args.sector_r, args.sector_g, args.sector_b)):
+                raise ValueError("set all of --sector-r --sector-g --sector-b together")
+            if has_sector_rgb and args.sector_idx is None:
+                raise ValueError("--sector-idx is required when setting --sector-r/--sector-g/--sector-b")
+            if args.sector_idx is not None and (args.sector_idx < 1 or args.sector_idx > 8):
+                raise ValueError("--sector-idx must be 1..8")
+            if args.sector_count is not None and (args.sector_count < 1 or args.sector_count > 255):
+                raise ValueError("--sector-count must be 1..255")
+
+            has_zone = any(v is not None for v in (args.zone_start, args.zone_end, args.zone_sector, args.zone_color))
+            if has_zone:
+                if not all(v is not None for v in (args.zone_start, args.zone_end, args.zone_sector, args.zone_color)):
+                    raise ValueError("set all of --zone-start --zone-end --zone-sector --zone-color together")
+                if args.zone_id is None:
+                    raise ValueError("--zone-id is required when setting zone fields")
+                if args.zone_id < 1 or args.zone_id > 32:
+                    raise ValueError("--zone-id must be 1..32 when setting a zone")
 
             has_grad = any(v is not None for v in (args.grad_split, args.grad_fade, args.grad_c1, args.grad_c2))
             if has_grad:
@@ -1319,6 +1549,84 @@ def main() -> int:
                 print(
                     f"LED_GRAD split={st['split_idx']} fade={st['fade_px']} "
                     f"c1=0x{st['color1_rgb565']:04X} c2=0x{st['color2_rgb565']:04X}"
+                )
+                return 0
+
+            if args.sector_mode_get:
+                st = client.ws_get_sector_mode()
+                print(
+                    f"LED_SECTOR_MODE on={int(st['enabled'])} fade={st['fade_speed']} "
+                    f"count={st['sector_count']} active={st['active_sector']} target={st['target_sector']}"
+                )
+                return 0
+
+            if args.sector_colors_get:
+                colors = client.ws_get_sector_color(0)
+                for c in colors:
+                    print(
+                        f"LED_SECTOR_COLOR idx={c['idx']} "
+                        f"rgb=({c['r']},{c['g']},{c['b']}) max={c['max_sectors']}"
+                )
+                return 0
+
+            if args.zone_get:
+                zone_idx = 0 if args.zone_id is None else int(args.zone_id)
+                if zone_idx < 0 or zone_idx > 32:
+                    raise ValueError("--zone-id for --zone-get must be 0..32")
+                zones = client.ws_get_sector_zone(zone_idx)
+                for z in zones:
+                    print(
+                        f"LED_ZONE idx={z['idx']} range={z['start_led']}..{z['end_led']} "
+                        f"sector={z['sector']} color=0x{z['color_rgb565']:04X}"
+                    )
+                return 0
+
+            has_sector_mode = (
+                args.sector_on
+                or args.sector_off
+                or args.sector_fade is not None
+                or args.sector_count is not None
+            )
+            if has_sector_mode:
+                cur = client.ws_get_sector_mode()
+                enabled = cur["enabled"]
+                if args.sector_on:
+                    enabled = True
+                elif args.sector_off:
+                    enabled = False
+                fade_speed = cur["fade_speed"] if args.sector_fade is None else int(args.sector_fade)
+                sector_count = cur["sector_count"] if args.sector_count is None else int(args.sector_count)
+                st = client.ws_set_sector_mode(enabled, fade_speed, sector_count)
+                print(
+                    f"LED_SECTOR_MODE_SET OK on={int(st['enabled'])} fade={st['fade_speed']} "
+                    f"count={st['sector_count']} active={st['active_sector']} target={st['target_sector']}"
+                )
+                return 0
+
+            if has_zone:
+                z = client.ws_set_sector_zone(
+                    int(args.zone_id),
+                    int(args.zone_start),
+                    int(args.zone_end),
+                    int(args.zone_sector),
+                    int(args.zone_color),
+                )
+                print(
+                    f"LED_ZONE_SET OK idx={z['idx']} range={z['start_led']}..{z['end_led']} "
+                    f"sector={z['sector']} color=0x{z['color_rgb565']:04X}"
+                )
+                return 0
+
+            if has_sector_rgb:
+                st = client.ws_set_sector_color(
+                    int(args.sector_idx),
+                    int(args.sector_r),
+                    int(args.sector_g),
+                    int(args.sector_b),
+                )
+                print(
+                    f"LED_SECTOR_COLOR_SET OK idx={st['idx']} "
+                    f"rgb=({st['r']},{st['g']},{st['b']}) max={st['max_sectors']}"
                 )
                 return 0
 

@@ -36,6 +36,10 @@ from app_can_tool import (
     FRAME_STATUS,
     FRAME_WS_STATE,
     FRAME_WS_ANIM,
+    FRAME_WS_GRADIENT,
+    FRAME_WS_SECTOR_COLOR,
+    FRAME_WS_SECTOR_MODE,
+    FRAME_WS_SECTOR_ZONE,
     HMC_DATA_RATE_ID_TO_HZ,
     HMC_MODE_ID_TO_NAME,
     HMC_RANGE_ID_TO_LABEL,
@@ -51,6 +55,9 @@ from app_can_tool import (
     parse_status_frame,
     parse_ws_anim_frame,
     parse_ws_gradient_frame,
+    parse_ws_sector_color_frame,
+    parse_ws_sector_mode_frame,
+    parse_ws_sector_zone_frame,
     parse_ws_state_frame,
     status_id_to_device_id,
     WS_ANIM_ID_TO_NAME,
@@ -105,7 +112,8 @@ MAX_RENDER_ENV_POINTS = 2000
 CMD_TIMEOUT_SHORT = 3.0
 CMD_TIMEOUT_LONG = 5.0
 EVENT_TYPE_IDS = sorted(EVENT_NAMES.keys())
-WS_ANIM_ROWS = sorted(WS_ANIM_NAME_TO_ID.items(), key=lambda kv: kv[1])
+WS_ANIM_ROWS = [(name, mode_id) for mode_id, name in sorted(WS_ANIM_ID_TO_NAME.items(), key=lambda kv: kv[0])]
+WS_GUI_ZONE_ROWS = 32
 
 
 def compute_slope_cdeg(x_mg: int, y_mg: int, z_mg: int) -> int:
@@ -119,6 +127,13 @@ def compute_plane_slopes_cdeg(x_mg: int, y_mg: int, z_mg: int) -> tuple[int, int
     slope_xz = int(round(math.degrees(math.atan2(float(z_mg), float(x_mg) + 1e-6)) * 100.0))
     slope_yz = int(round(math.degrees(math.atan2(float(z_mg), float(y_mg) + 1e-6)) * 100.0))
     return slope_xy, slope_xz, slope_yz
+
+
+def ws_anim_index_for_mode(mode: int) -> int:
+    for i, (_name, mode_id) in enumerate(WS_ANIM_ROWS):
+        if int(mode_id) == int(mode):
+            return i
+    return 0
 
 
 def rgb888_to_rgb565(r: int, g: int, b: int) -> int:
@@ -330,6 +345,18 @@ class CalibApp(Gtk.Application):
             "c2_g": 0,
             "c2_b": 0,
         }
+        self.ws_sector_cfg = {
+            "enabled": False,
+            "fade_speed": 120,
+            "sector_count": 6,
+            "active_sector": 0,
+            "target_sector": 0,
+            "max_zones": 32,
+        }
+        self.ws_sector_colors = [
+            {"idx": i + 1, "start": 0, "end": 0, "sector": 0, "r": 0, "g": 0, "b": 0}
+            for i in range(WS_GUI_ZONE_ROWS)
+        ]
         self.ws_supported: bool | None = None
 
         self.window = None
@@ -423,6 +450,10 @@ class CalibApp(Gtk.Application):
         self.ws_grad_c2_r_spin = None
         self.ws_grad_c2_g_spin = None
         self.ws_grad_c2_b_spin = None
+        self.ws_sector_enable_switch = None
+        self.ws_sector_fade_spin = None
+        self.ws_sector_count_spin = None
+        self.ws_sector_color_spins = []
 
         self.last_status_text = ""
         self.last_chart_meta_text = ""
@@ -930,8 +961,8 @@ class CalibApp(Gtk.Application):
         ws_grid.attach(Gtk.Label(label="Animation", xalign=0), 0, 3, 1, 1)
         self.ws_anim_combo = Gtk.ComboBoxText()
         for name, mode_id in WS_ANIM_ROWS:
-            self.ws_anim_combo.append(str(mode_id), f"{mode_id}: {name}")
-        self.ws_anim_combo.set_active_id(str(int(self.ws_anim_cfg["mode"])))
+            self.ws_anim_combo.append_text(f"{mode_id}: {name}")
+        self.ws_anim_combo.set_active(ws_anim_index_for_mode(int(self.ws_anim_cfg["mode"])))
         self.ws_anim_combo.connect("changed", self.on_ws_anim_combo_changed)
         ws_grid.attach(self.ws_anim_combo, 1, 3, 1, 1)
 
@@ -1011,6 +1042,72 @@ class CalibApp(Gtk.Application):
         c2_row.append(self.ws_grad_c2_g_spin)
         c2_row.append(self.ws_grad_c2_b_spin)
         ws_grid.attach(c2_row, 1, 8, 1, 1)
+
+        ws_grid.attach(Gtk.Label(label="Sector Follow On", xalign=0), 0, 9, 1, 1)
+        self.ws_sector_enable_switch = Gtk.Switch()
+        self.ws_sector_enable_switch.set_active(bool(self.ws_sector_cfg["enabled"]))
+        self.ws_sector_enable_switch.connect(
+            "notify::active",
+            lambda sw, _pspec: self.on_ws_sector_enable_changed(sw.get_active()),
+        )
+        ws_grid.attach(self.ws_sector_enable_switch, 1, 9, 1, 1)
+
+        ws_grid.attach(Gtk.Label(label="Sector Count", xalign=0), 0, 10, 1, 1)
+        self.ws_sector_count_spin = Gtk.SpinButton()
+        self.ws_sector_count_spin.set_range(1, 255)
+        self.ws_sector_count_spin.set_increments(1, 1)
+        self.ws_sector_count_spin.set_numeric(True)
+        self.ws_sector_count_spin.set_value(float(self.ws_sector_cfg["sector_count"]))
+        self.ws_sector_count_spin.connect("value-changed", self.on_ws_sector_count_changed)
+        ws_grid.attach(self.ws_sector_count_spin, 1, 10, 1, 1)
+
+        ws_grid.attach(Gtk.Label(label="Sector Fade", xalign=0), 0, 11, 1, 1)
+        self.ws_sector_fade_spin = Gtk.SpinButton()
+        self.ws_sector_fade_spin.set_range(0, 255)
+        self.ws_sector_fade_spin.set_increments(1, 8)
+        self.ws_sector_fade_spin.set_numeric(True)
+        self.ws_sector_fade_spin.set_value(float(self.ws_sector_cfg["fade_speed"]))
+        self.ws_sector_fade_spin.connect("value-changed", self.on_ws_sector_fade_changed)
+        ws_grid.attach(self.ws_sector_fade_spin, 1, 11, 1, 1)
+
+        for i in range(WS_GUI_ZONE_ROWS):
+            row = 12 + i
+            ws_grid.attach(Gtk.Label(label=f"Zone {i + 1} S/E/Sec + R/G/B", xalign=0), 0, row, 1, 1)
+            rgb_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            start_spin = Gtk.SpinButton()
+            end_spin = Gtk.SpinButton()
+            sector_spin = Gtk.SpinButton()
+            r_spin = Gtk.SpinButton()
+            g_spin = Gtk.SpinButton()
+            b_spin = Gtk.SpinButton()
+            for spin in (start_spin, end_spin, sector_spin, r_spin, g_spin, b_spin):
+                spin.set_range(0, 255)
+                spin.set_increments(1, 4)
+                spin.set_numeric(True)
+            for spin in (r_spin, g_spin, b_spin):
+                spin.set_range(0, 255)
+                spin.set_increments(1, 8)
+                spin.set_numeric(True)
+            start_spin.set_value(float(self.ws_sector_colors[i]["start"]))
+            end_spin.set_value(float(self.ws_sector_colors[i]["end"]))
+            sector_spin.set_value(float(self.ws_sector_colors[i]["sector"]))
+            r_spin.set_value(float(self.ws_sector_colors[i]["r"]))
+            g_spin.set_value(float(self.ws_sector_colors[i]["g"]))
+            b_spin.set_value(float(self.ws_sector_colors[i]["b"]))
+            start_spin.connect("value-changed", lambda s, idx=i: self.on_ws_sector_color_changed(idx, "start", int(s.get_value())))
+            end_spin.connect("value-changed", lambda s, idx=i: self.on_ws_sector_color_changed(idx, "end", int(s.get_value())))
+            sector_spin.connect("value-changed", lambda s, idx=i: self.on_ws_sector_color_changed(idx, "sector", int(s.get_value())))
+            r_spin.connect("value-changed", lambda s, idx=i: self.on_ws_sector_color_changed(idx, "r", int(s.get_value())))
+            g_spin.connect("value-changed", lambda s, idx=i: self.on_ws_sector_color_changed(idx, "g", int(s.get_value())))
+            b_spin.connect("value-changed", lambda s, idx=i: self.on_ws_sector_color_changed(idx, "b", int(s.get_value())))
+            rgb_row.append(start_spin)
+            rgb_row.append(end_spin)
+            rgb_row.append(sector_spin)
+            rgb_row.append(r_spin)
+            rgb_row.append(g_spin)
+            rgb_row.append(b_spin)
+            ws_grid.attach(rgb_row, 1, row, 1, 1)
+            self.ws_sector_color_spins.append((start_spin, end_spin, sector_spin, r_spin, g_spin, b_spin))
         ws_box.append(ws_grid)
 
         ws_btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -1030,6 +1127,14 @@ class CalibApp(Gtk.Application):
         b_ws_grad_get.connect("clicked", lambda *_: self.run_async("ws-grad-get", self.action_ws_grad_get))
         b_ws_grad_apply = Gtk.Button(label="Apply Gradient")
         b_ws_grad_apply.connect("clicked", lambda *_: self.run_async("ws-grad-apply", self.action_ws_grad_apply))
+        b_ws_sector_mode_get = Gtk.Button(label="Get Sector Mode")
+        b_ws_sector_mode_get.connect("clicked", lambda *_: self.run_async("ws-sector-mode-get", self.action_ws_sector_mode_get))
+        b_ws_sector_mode_apply = Gtk.Button(label="Apply Sector Mode")
+        b_ws_sector_mode_apply.connect("clicked", lambda *_: self.run_async("ws-sector-mode-apply", self.action_ws_sector_mode_apply))
+        b_ws_sector_colors_get = Gtk.Button(label="Get Zones")
+        b_ws_sector_colors_get.connect("clicked", lambda *_: self.run_async("ws-sector-colors-get", self.action_ws_sector_colors_get))
+        b_ws_sector_colors_apply = Gtk.Button(label="Apply Zones")
+        b_ws_sector_colors_apply.connect("clicked", lambda *_: self.run_async("ws-sector-colors-apply", self.action_ws_sector_colors_apply))
         ws_btns.append(b_ws_get)
         ws_btns.append(b_ws_apply)
         ws_btns.append(b_ws_off)
@@ -1038,6 +1143,10 @@ class CalibApp(Gtk.Application):
         ws_btns.append(b_ws_anim_apply)
         ws_btns.append(b_ws_grad_get)
         ws_btns.append(b_ws_grad_apply)
+        ws_btns.append(b_ws_sector_mode_get)
+        ws_btns.append(b_ws_sector_mode_apply)
+        ws_btns.append(b_ws_sector_colors_get)
+        ws_btns.append(b_ws_sector_colors_apply)
         ws_box.append(ws_btns)
 
         self.ws_status_label = Gtk.Label(label="WS2812: -")
@@ -1783,6 +1892,41 @@ class CalibApp(Gtk.Application):
                 self.ws_grad_cfg["c2_r"] = r2
                 self.ws_grad_cfg["c2_g"] = g2
                 self.ws_grad_cfg["c2_b"] = b2
+                self.update_ws_widgets()
+
+            elif data[0] == 0 and subtype == FRAME_WS_SECTOR_MODE and len(data) >= 7:
+                parsed = parse_ws_sector_mode_frame(data)
+                self.ws_supported = True
+                self.ws_sector_cfg["enabled"] = bool(parsed["enabled"])
+                self.ws_sector_cfg["fade_speed"] = int(parsed["fade_speed"])
+                self.ws_sector_cfg["sector_count"] = int(parsed["sector_count"])
+                self.ws_sector_cfg["active_sector"] = int(parsed["active_sector"])
+                self.ws_sector_cfg["target_sector"] = int(parsed["target_sector"])
+                self.ws_sector_cfg["max_zones"] = int(parsed.get("max_zones", self.ws_sector_cfg.get("max_zones", 0)))
+                self.update_ws_widgets()
+
+            elif data[0] == 0 and subtype == FRAME_WS_SECTOR_COLOR and len(data) >= 7:
+                parsed = parse_ws_sector_color_frame(data)
+                self.ws_supported = True
+                idx = int(parsed["idx"])
+                if 1 <= idx <= len(self.ws_sector_colors):
+                    self.ws_sector_colors[idx - 1]["r"] = int(parsed["r"])
+                    self.ws_sector_colors[idx - 1]["g"] = int(parsed["g"])
+                    self.ws_sector_colors[idx - 1]["b"] = int(parsed["b"])
+                self.update_ws_widgets()
+
+            elif data[0] == 0 and subtype == FRAME_WS_SECTOR_ZONE and len(data) >= 8:
+                parsed = parse_ws_sector_zone_frame(data)
+                self.ws_supported = True
+                idx = int(parsed["idx"])
+                if 1 <= idx <= len(self.ws_sector_colors):
+                    rr, gg, bb = rgb565_to_rgb888(int(parsed["color_rgb565"]))
+                    self.ws_sector_colors[idx - 1]["start"] = int(parsed["start_led"])
+                    self.ws_sector_colors[idx - 1]["end"] = int(parsed["end_led"])
+                    self.ws_sector_colors[idx - 1]["sector"] = int(parsed["sector"])
+                    self.ws_sector_colors[idx - 1]["r"] = rr
+                    self.ws_sector_colors[idx - 1]["g"] = gg
+                    self.ws_sector_colors[idx - 1]["b"] = bb
                 self.update_ws_widgets()
 
             elif data[0] == 0 and subtype == FRAME_CALIB_VALUE and len(data) >= 5:
@@ -2578,10 +2722,10 @@ class CalibApp(Gtk.Application):
     def on_ws_anim_combo_changed(self, combo: Gtk.ComboBoxText):
         if self.suppress_ws_events:
             return
-        active = combo.get_active_id()
-        if active is None:
+        idx = combo.get_active()
+        if idx < 0:
             return
-        self.ws_anim_cfg["mode"] = int(active)
+        self.ws_anim_cfg["mode"] = int(WS_ANIM_ROWS[idx][1])
 
     def on_ws_anim_speed_changed(self, spin: Gtk.SpinButton):
         if self.suppress_ws_events:
@@ -2603,6 +2747,28 @@ class CalibApp(Gtk.Application):
             return
         self.ws_grad_cfg[key] = int(value)
 
+    def on_ws_sector_enable_changed(self, enabled: bool):
+        if self.suppress_ws_events:
+            return
+        self.ws_sector_cfg["enabled"] = bool(enabled)
+
+    def on_ws_sector_count_changed(self, spin: Gtk.SpinButton):
+        if self.suppress_ws_events:
+            return
+        self.ws_sector_cfg["sector_count"] = int(spin.get_value())
+
+    def on_ws_sector_fade_changed(self, spin: Gtk.SpinButton):
+        if self.suppress_ws_events:
+            return
+        self.ws_sector_cfg["fade_speed"] = int(spin.get_value())
+
+    def on_ws_sector_color_changed(self, idx: int, key: str, value: int):
+        if self.suppress_ws_events:
+            return
+        if idx < 0 or idx >= len(self.ws_sector_colors):
+            return
+        self.ws_sector_colors[idx][key] = int(value)
+
     def update_ws_widgets(self):
         self.suppress_ws_events = True
         try:
@@ -2617,7 +2783,7 @@ class CalibApp(Gtk.Application):
             if self.ws_b_spin is not None:
                 self.ws_b_spin.set_value(float(self.ws_cfg["b"]))
             if self.ws_anim_combo is not None:
-                self.ws_anim_combo.set_active_id(str(int(self.ws_anim_cfg["mode"])))
+                self.ws_anim_combo.set_active(ws_anim_index_for_mode(int(self.ws_anim_cfg["mode"])))
             if self.ws_anim_speed_spin is not None:
                 self.ws_anim_speed_spin.set_value(float(self.ws_anim_cfg["speed"]))
             if self.ws_grad_split_spin is not None:
@@ -2636,6 +2802,20 @@ class CalibApp(Gtk.Application):
                 self.ws_grad_c2_g_spin.set_value(float(self.ws_grad_cfg["c2_g"]))
             if self.ws_grad_c2_b_spin is not None:
                 self.ws_grad_c2_b_spin.set_value(float(self.ws_grad_cfg["c2_b"]))
+            if self.ws_sector_enable_switch is not None:
+                self.ws_sector_enable_switch.set_active(bool(self.ws_sector_cfg["enabled"]))
+            if self.ws_sector_count_spin is not None:
+                self.ws_sector_count_spin.set_value(float(self.ws_sector_cfg["sector_count"]))
+            if self.ws_sector_fade_spin is not None:
+                self.ws_sector_fade_spin.set_value(float(self.ws_sector_cfg["fade_speed"]))
+            for i, spins in enumerate(self.ws_sector_color_spins):
+                cfg = self.ws_sector_colors[i]
+                spins[0].set_value(float(cfg["start"]))
+                spins[1].set_value(float(cfg["end"]))
+                spins[2].set_value(float(cfg["sector"]))
+                spins[3].set_value(float(cfg["r"]))
+                spins[4].set_value(float(cfg["g"]))
+                spins[5].set_value(float(cfg["b"]))
         finally:
             self.suppress_ws_events = False
         supported = (self.ws_supported is not False)
@@ -2655,9 +2835,15 @@ class CalibApp(Gtk.Application):
             self.ws_grad_c2_r_spin,
             self.ws_grad_c2_g_spin,
             self.ws_grad_c2_b_spin,
+            self.ws_sector_enable_switch,
+            self.ws_sector_count_spin,
+            self.ws_sector_fade_spin,
         ):
             if w is not None:
                 w.set_sensitive(supported)
+        for spins in self.ws_sector_color_spins:
+            for spin in spins:
+                spin.set_sensitive(supported)
         self.update_ws_status_label()
 
     def update_ws_status_label(self):
@@ -2674,7 +2860,10 @@ class CalibApp(Gtk.Application):
             f"len={int(self.ws_cfg.get('strip_len', 0))} "
             f"anim={WS_ANIM_ID_TO_NAME.get(int(self.ws_anim_cfg['mode']), self.ws_anim_cfg['mode'])} "
             f"speed={int(self.ws_anim_cfg['speed'])} "
-            f"grad(split={int(self.ws_grad_cfg['split_idx'])},fade={int(self.ws_grad_cfg['fade_px'])})"
+            f"grad(split={int(self.ws_grad_cfg['split_idx'])},fade={int(self.ws_grad_cfg['fade_px'])}) "
+            f"sector(on={int(bool(self.ws_sector_cfg['enabled']))},cnt={int(self.ws_sector_cfg['sector_count'])},"
+            f"fade={int(self.ws_sector_cfg['fade_speed'])},act={int(self.ws_sector_cfg['active_sector'])},"
+            f"tgt={int(self.ws_sector_cfg['target_sector'])},zones={int(self.ws_sector_cfg.get('max_zones', 0))})"
         )
 
     def action_switch_device(self):
@@ -2872,6 +3061,32 @@ class CalibApp(Gtk.Application):
         st = self.client.ws_get_state()
         anim = self.client.ws_get_anim()
         grad = self.client.ws_get_gradient()
+        sector_mode = None
+        sector_colors = []
+        try:
+            sector_mode = self.client.ws_get_sector_mode()
+        except Exception:
+            # Keep backward compatibility with firmware that only supports base WS controls.
+            pass
+        try:
+            sector_colors = self.client.ws_get_sector_zone(0)
+        except Exception:
+            try:
+                legacy = self.client.ws_get_sector_color(0)
+                sector_colors = []
+                for c in legacy:
+                    idx = int(c.get("idx", 0))
+                    if idx <= 0:
+                        continue
+                    sector_colors.append({
+                        "idx": idx,
+                        "start_led": 1,
+                        "end_led": int(st.get("strip_len", 0)),
+                        "sector": idx,
+                        "color_rgb565": rgb888_to_rgb565(int(c["r"]), int(c["g"]), int(c["b"])),
+                    })
+            except Exception:
+                sector_colors = []
         self.ws_supported = True
         self.ws_cfg["enabled"] = bool(st["enabled"])
         self.ws_cfg["brightness"] = int(st["brightness"])
@@ -2891,13 +3106,39 @@ class CalibApp(Gtk.Application):
         self.ws_grad_cfg["c2_r"] = c2r
         self.ws_grad_cfg["c2_g"] = c2g
         self.ws_grad_cfg["c2_b"] = c2b
+        if sector_mode is not None:
+            self.ws_sector_cfg["enabled"] = bool(sector_mode["enabled"])
+            self.ws_sector_cfg["fade_speed"] = int(sector_mode["fade_speed"])
+            self.ws_sector_cfg["sector_count"] = int(sector_mode["sector_count"])
+            self.ws_sector_cfg["active_sector"] = int(sector_mode["active_sector"])
+            self.ws_sector_cfg["target_sector"] = int(sector_mode["target_sector"])
+            self.ws_sector_cfg["max_zones"] = int(sector_mode.get("max_zones", self.ws_sector_cfg.get("max_zones", 0)))
+            for i in range(len(self.ws_sector_colors)):
+                self.ws_sector_colors[i]["start"] = 0
+                self.ws_sector_colors[i]["end"] = 0
+                self.ws_sector_colors[i]["sector"] = 0
+                self.ws_sector_colors[i]["r"] = 0
+                self.ws_sector_colors[i]["g"] = 0
+                self.ws_sector_colors[i]["b"] = 0
+            for c in sector_colors:
+                idx = int(c.get("idx", 0))
+                if 1 <= idx <= len(self.ws_sector_colors):
+                    rr, gg, bb = rgb565_to_rgb888(int(c["color_rgb565"]))
+                    self.ws_sector_colors[idx - 1]["start"] = int(c["start_led"])
+                    self.ws_sector_colors[idx - 1]["end"] = int(c["end_led"])
+                    self.ws_sector_colors[idx - 1]["sector"] = int(c["sector"])
+                    self.ws_sector_colors[idx - 1]["r"] = rr
+                    self.ws_sector_colors[idx - 1]["g"] = gg
+                    self.ws_sector_colors[idx - 1]["b"] = bb
         GLib.idle_add(self.update_ws_widgets)
         self.log(
             "WS state refreshed "
             f"on={int(self.ws_cfg['enabled'])} br={self.ws_cfg['brightness']} "
             f"rgb=({self.ws_cfg['r']},{self.ws_cfg['g']},{self.ws_cfg['b']}) len={self.ws_cfg['strip_len']} "
             f"anim={self.ws_anim_cfg['mode']}/{self.ws_anim_cfg['speed']} "
-            f"grad={self.ws_grad_cfg['split_idx']}/{self.ws_grad_cfg['fade_px']}"
+            f"grad={self.ws_grad_cfg['split_idx']}/{self.ws_grad_cfg['fade_px']} "
+            f"sector={int(self.ws_sector_cfg['enabled'])}/{self.ws_sector_cfg['sector_count']}/"
+            f"{self.ws_sector_cfg['fade_speed']}"
         )
 
     def action_ws_get_optional_locked(self):
@@ -2920,15 +3161,20 @@ class CalibApp(Gtk.Application):
             raise RuntimeError("WS2812 control is not supported by current firmware")
 
         def _apply_locked():
-            st = self.client.ws_set_all(
-                bool(self.ws_cfg["enabled"]),
-                int(self.ws_cfg["brightness"]),
-                int(self.ws_cfg["r"]),
-                int(self.ws_cfg["g"]),
-                int(self.ws_cfg["b"]),
-            )
-            self.client.ws_set_anim(WS_ANIM_NAME_TO_ID["static"], int(self.ws_anim_cfg["speed"]))
-            return st
+            mode = int(self.ws_anim_cfg["mode"])
+            if mode == WS_ANIM_NAME_TO_ID.get("static", 0):
+                st = self.client.ws_set_all(
+                    bool(self.ws_cfg["enabled"]),
+                    int(self.ws_cfg["brightness"]),
+                    int(self.ws_cfg["r"]),
+                    int(self.ws_cfg["g"]),
+                    int(self.ws_cfg["b"]),
+                )
+                self.client.ws_set_anim(WS_ANIM_NAME_TO_ID["static"], int(self.ws_anim_cfg["speed"]))
+                return st
+            self.client.ws_set_power(bool(self.ws_cfg["enabled"]))
+            self.client.ws_set_brightness(int(self.ws_cfg["brightness"]))
+            return self.client.ws_get_state()
 
         st = self.with_lock(_apply_locked, min_timeout=CMD_TIMEOUT_SHORT)
         self.ws_cfg["enabled"] = bool(st["enabled"])
@@ -2951,6 +3197,7 @@ class CalibApp(Gtk.Application):
         info = self.with_lock(self.client.ws_get_anim, min_timeout=CMD_TIMEOUT_SHORT)
         self.ws_anim_cfg["mode"] = int(info["mode"])
         self.ws_anim_cfg["speed"] = int(info["speed"])
+        self.ws_sector_cfg["enabled"] = (self.ws_anim_cfg["mode"] == WS_ANIM_NAME_TO_ID.get("sector-follow", 6))
         GLib.idle_add(self.update_ws_widgets)
         self.log(f"WS anim refreshed mode={info['mode_name']}({info['mode']}) speed={info['speed']}")
 
@@ -2964,6 +3211,7 @@ class CalibApp(Gtk.Application):
         )
         self.ws_anim_cfg["mode"] = int(info["mode"])
         self.ws_anim_cfg["speed"] = int(info["speed"])
+        self.ws_sector_cfg["enabled"] = (self.ws_anim_cfg["mode"] == WS_ANIM_NAME_TO_ID.get("sector-follow", 6))
         GLib.idle_add(self.update_ws_widgets)
         self.log(f"WS anim applied mode={info['mode_name']}({info['mode']}) speed={info['speed']}")
 
@@ -3009,6 +3257,116 @@ class CalibApp(Gtk.Application):
             f"WS gradient applied split={info['split_idx']} fade={info['fade_px']} "
             f"c1=0x{int(info['color1_rgb565']):04X} c2=0x{int(info['color2_rgb565']):04X}"
         )
+
+    def action_ws_sector_mode_get(self):
+        if self.ws_supported is False:
+            raise RuntimeError("WS2812 control is not supported by current firmware")
+
+        info = self.with_lock(self.client.ws_get_sector_mode, min_timeout=CMD_TIMEOUT_SHORT)
+        self.ws_sector_cfg["enabled"] = bool(info["enabled"])
+        self.ws_sector_cfg["fade_speed"] = int(info["fade_speed"])
+        self.ws_sector_cfg["sector_count"] = int(info["sector_count"])
+        self.ws_sector_cfg["active_sector"] = int(info["active_sector"])
+        self.ws_sector_cfg["target_sector"] = int(info["target_sector"])
+        self.ws_sector_cfg["max_zones"] = int(info.get("max_zones", self.ws_sector_cfg.get("max_zones", 0)))
+        GLib.idle_add(self.update_ws_widgets)
+        self.log(
+            f"WS sector mode refreshed on={int(info['enabled'])} fade={info['fade_speed']} "
+            f"count={info['sector_count']} active={info['active_sector']} target={info['target_sector']} "
+            f"max_zones={info.get('max_zones', 0)}"
+        )
+
+    def action_ws_sector_mode_apply(self):
+        if self.ws_supported is False:
+            raise RuntimeError("WS2812 control is not supported by current firmware")
+
+        info = self.with_lock(
+            lambda: self.client.ws_set_sector_mode(
+                bool(self.ws_sector_cfg["enabled"]),
+                int(self.ws_sector_cfg["fade_speed"]),
+                int(self.ws_sector_cfg["sector_count"]),
+            ),
+            min_timeout=CMD_TIMEOUT_SHORT,
+        )
+        self.ws_sector_cfg["enabled"] = bool(info["enabled"])
+        self.ws_sector_cfg["fade_speed"] = int(info["fade_speed"])
+        self.ws_sector_cfg["sector_count"] = int(info["sector_count"])
+        self.ws_sector_cfg["active_sector"] = int(info["active_sector"])
+        self.ws_sector_cfg["target_sector"] = int(info["target_sector"])
+        self.ws_sector_cfg["max_zones"] = int(info.get("max_zones", self.ws_sector_cfg.get("max_zones", 0)))
+        if self.ws_sector_cfg["enabled"]:
+            self.ws_anim_cfg["mode"] = WS_ANIM_NAME_TO_ID.get("sector-follow", 6)
+        GLib.idle_add(self.update_ws_widgets)
+        self.log(
+            f"WS sector mode applied on={int(info['enabled'])} fade={info['fade_speed']} "
+            f"count={info['sector_count']} active={info['active_sector']} target={info['target_sector']} "
+            f"max_zones={info.get('max_zones', 0)}"
+        )
+
+    def action_ws_sector_colors_get(self):
+        if self.ws_supported is False:
+            raise RuntimeError("WS2812 control is not supported by current firmware")
+
+        try:
+            colors = self.with_lock(lambda: self.client.ws_get_sector_zone(0), min_timeout=CMD_TIMEOUT_LONG)
+        except Exception:
+            legacy = self.with_lock(lambda: self.client.ws_get_sector_color(0), min_timeout=CMD_TIMEOUT_SHORT)
+            colors = []
+            for c in legacy:
+                idx = int(c.get("idx", 0))
+                if idx <= 0:
+                    continue
+                colors.append({
+                    "idx": idx,
+                    "start_led": 1,
+                    "end_led": int(self.ws_cfg.get("strip_len", 0)),
+                    "sector": idx,
+                    "color_rgb565": rgb888_to_rgb565(int(c["r"]), int(c["g"]), int(c["b"])),
+                })
+        for i in range(len(self.ws_sector_colors)):
+            self.ws_sector_colors[i]["start"] = 0
+            self.ws_sector_colors[i]["end"] = 0
+            self.ws_sector_colors[i]["sector"] = 0
+            self.ws_sector_colors[i]["r"] = 0
+            self.ws_sector_colors[i]["g"] = 0
+            self.ws_sector_colors[i]["b"] = 0
+        for c in colors:
+            idx = int(c.get("idx", 0))
+            if 1 <= idx <= len(self.ws_sector_colors):
+                rr, gg, bb = rgb565_to_rgb888(int(c["color_rgb565"]))
+                self.ws_sector_colors[idx - 1]["start"] = int(c["start_led"])
+                self.ws_sector_colors[idx - 1]["end"] = int(c["end_led"])
+                self.ws_sector_colors[idx - 1]["sector"] = int(c["sector"])
+                self.ws_sector_colors[idx - 1]["r"] = rr
+                self.ws_sector_colors[idx - 1]["g"] = gg
+                self.ws_sector_colors[idx - 1]["b"] = bb
+        GLib.idle_add(self.update_ws_widgets)
+        self.log(f"WS zones refreshed ({len(colors)} entries)")
+
+    def action_ws_sector_colors_apply(self):
+        if self.ws_supported is False:
+            raise RuntimeError("WS2812 control is not supported by current firmware")
+
+        def _apply_locked():
+            try:
+                for i in range(len(self.ws_sector_colors)):
+                    c = self.ws_sector_colors[i]
+                    color565 = rgb888_to_rgb565(int(c["r"]), int(c["g"]), int(c["b"]))
+                    self.client.ws_set_sector_zone(
+                        i + 1,
+                        int(c["start"]),
+                        int(c["end"]),
+                        int(c["sector"]),
+                        int(color565),
+                    )
+            except Exception:
+                # Legacy fallback: apply first 8 entries as full-strip sector colors.
+                for i in range(min(8, len(self.ws_sector_colors))):
+                    c = self.ws_sector_colors[i]
+                    self.client.ws_set_sector_color(i + 1, int(c["r"]), int(c["g"]), int(c["b"]))
+
+        self.with_lock(_apply_locked, min_timeout=CMD_TIMEOUT_LONG)
+        self.log(f"WS zones applied (1..{len(self.ws_sector_colors)})")
 
     def action_ws_off(self):
         self.ws_cfg["enabled"] = False

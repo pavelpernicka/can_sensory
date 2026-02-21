@@ -10,6 +10,8 @@
 
 #include <string.h>
 
+#define WS_LEGACY_SECTOR_COLORS 8U
+
 CAN_HandleTypeDef hcan1;
 I2C_HandleTypeDef hi2c1;
 
@@ -416,6 +418,57 @@ static void App_SendWsGradient(void)
     frame[5] = (uint8_t)(cfg.color1_rgb565 >> 8);
     frame[6] = (uint8_t)(cfg.color2_rgb565 & 0xFFU);
     frame[7] = (uint8_t)(cfg.color2_rgb565 >> 8);
+    APP_CAN_SendFrame(frame, 8);
+}
+
+static void App_SendWsSectorMode(void)
+{
+    ws2812_sector_mode_t cfg = {0};
+    uint8_t frame[8] = {0};
+
+    WS2812_GetSectorMode(&cfg);
+    frame[0] = 0x00;
+    frame[1] = APP_FRAME_WS_SECTOR_MODE;
+    frame[2] = cfg.enabled;
+    frame[3] = cfg.fade_speed;
+    frame[4] = cfg.sector_count;
+    frame[5] = cfg.active_sector;
+    frame[6] = cfg.target_sector;
+    frame[7] = cfg.max_zones;
+    APP_CAN_SendFrame(frame, 8);
+}
+
+static void App_SendWsSectorColor(uint8_t idx)
+{
+    ws2812_sector_color_t cfg = {0};
+    uint8_t frame[8] = {0};
+
+    WS2812_GetSectorColor(idx, &cfg);
+    frame[0] = 0x00;
+    frame[1] = APP_FRAME_WS_SECTOR_COLOR;
+    frame[2] = cfg.idx;
+    frame[3] = cfg.r;
+    frame[4] = cfg.g;
+    frame[5] = cfg.b;
+    frame[6] = WS_LEGACY_SECTOR_COLORS;
+    frame[7] = 0;
+    APP_CAN_SendFrame(frame, 8);
+}
+
+static void App_SendWsSectorZone(uint8_t idx)
+{
+    ws2812_sector_zone_t cfg = {0};
+    uint8_t frame[8] = {0};
+
+    WS2812_GetSectorZone(idx, &cfg);
+    frame[0] = 0x00;
+    frame[1] = APP_FRAME_WS_SECTOR_ZONE;
+    frame[2] = cfg.idx;
+    frame[3] = cfg.start_led;
+    frame[4] = cfg.end_led;
+    frame[5] = cfg.sector;
+    frame[6] = (uint8_t)(cfg.color_rgb565 & 0xFFU);
+    frame[7] = (uint8_t)(cfg.color_rgb565 >> 8);
     APP_CAN_SendFrame(frame, 8);
 }
 
@@ -893,6 +946,90 @@ static void App_HandleCommand(const uint8_t *data, uint8_t len)
         App_SendWsGradient();
         break;
 
+    case APP_CMD_WS_SET_SECTOR_COLOR:
+        if (len < 5U || data[1] == 0U || data[1] > WS_LEGACY_SECTOR_COLORS) {
+            APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x59);
+            break;
+        }
+        WS2812_SetSectorColor(data[1], data[2], data[3], data[4]);
+        WS2812_Apply();
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x59);
+        App_SendWsSectorColor(data[1]);
+        break;
+
+    case APP_CMD_WS_GET_SECTOR_COLOR:
+        sid = (len >= 2U) ? data[1] : 0U;
+        if (sid > WS_LEGACY_SECTOR_COLORS) {
+            APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, sid);
+            break;
+        }
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x5A);
+        if (sid == 0U) {
+            for (uint8_t i = 1U; i <= WS_LEGACY_SECTOR_COLORS; ++i) {
+                App_SendWsSectorColor(i);
+            }
+        } else {
+            App_SendWsSectorColor(sid);
+        }
+        break;
+
+    case APP_CMD_WS_SET_SECTOR_MODE:
+        if (len < 4U) {
+            APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x5B);
+            break;
+        }
+        WS2812_SetSectorMode(data[1], data[2], data[3]);
+        WS2812_Apply();
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x5B);
+        App_SendWsSectorMode();
+        break;
+
+    case APP_CMD_WS_GET_SECTOR_MODE:
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x5C);
+        App_SendWsSectorMode();
+        break;
+
+    case APP_CMD_WS_SET_SECTOR_ZONE:
+        if (len < 7U || data[1] == 0U || data[1] > WS2812_MAX_ZONES) {
+            APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x5D);
+            break;
+        }
+        if ((data[2] > APP_WS2812_STRIP_LEN) || (data[3] > APP_WS2812_STRIP_LEN)) {
+            APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x5D);
+            break;
+        }
+        if ((data[2] != 0U) && (data[3] != 0U) && (data[2] > data[3])) {
+            APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, 0x5D);
+            break;
+        }
+        WS2812_SetSectorZone(
+            data[1],
+            data[2],
+            data[3],
+            data[4],
+            (uint16_t)data[5] | ((uint16_t)data[6] << 8)
+        );
+        WS2812_Apply();
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x5D);
+        App_SendWsSectorZone(data[1]);
+        break;
+
+    case APP_CMD_WS_GET_SECTOR_ZONE:
+        sid = (len >= 2U) ? data[1] : 0U;
+        if (sid > WS2812_MAX_ZONES) {
+            APP_CAN_SendStatus(APP_STATUS_ERR_RANGE, sid);
+            break;
+        }
+        APP_CAN_SendStatus(APP_STATUS_OK, 0x5E);
+        if (sid == 0U) {
+            for (uint8_t i = 1U; i <= WS2812_MAX_ZONES; ++i) {
+                App_SendWsSectorZone(i);
+            }
+        } else {
+            App_SendWsSectorZone(sid);
+        }
+        break;
+
     case APP_CMD_CALIB_GET:
         sid = (len >= 2U) ? data[1] : 0U;
         if (sid == 0U) {
@@ -992,6 +1129,8 @@ int main(void)
 {
     uint8_t rx_data[8];
     uint8_t rx_len;
+    uint8_t cur_sector;
+    uint8_t cur_elev;
     app_event_t ev;
     uint32_t now;
 
@@ -1027,6 +1166,8 @@ int main(void)
     while (1) {
         now = HAL_GetTick();
         Led_Service(now);
+        Events_GetSectorState(&cur_sector, &cur_elev);
+        WS2812_SetActiveSector(cur_sector);
         WS2812_Service(now);
 
         while (APP_CAN_TryRecv(rx_data, &rx_len)) {

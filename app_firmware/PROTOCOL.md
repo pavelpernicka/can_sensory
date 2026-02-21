@@ -109,6 +109,7 @@ Payload:
   - `3` rainbow
   - `4` wipe
   - `5` gradient (spatial split/fade pattern)
+  - `6` sector-follow (whole strip color follows current event sector with crossfade)
 - `speed`: `0..255` (meaning depends on mode)
 
 Response:
@@ -145,6 +146,73 @@ Payload:
 Response:
 - status `OK, extra=0x58`
 - `WS_GRADIENT` frame (`subtype=0x49`)
+
+### `0x59` `WS_SET_SECTOR_COLOR`
+
+Payload:
+- `[0x59, idx, r, g, b]`
+- `idx`: `1..8` sector index
+- `r/g/b`: `0..255`
+
+Response:
+- status `OK, extra=0x59`
+- `WS_SECTOR_COLOR` frame (`subtype=0x4A`) for updated `idx`
+
+### `0x5A` `WS_GET_SECTOR_COLOR`
+
+Payload:
+- `[0x5A]` or `[0x5A, idx]`
+- `idx=0`: return all sector colors (`1..8`)
+- `idx=1..8`: return one sector color
+
+Response:
+- status `OK, extra=0x5A`
+- one or more `WS_SECTOR_COLOR` frame(s) (`subtype=0x4A`)
+
+### `0x5B` `WS_SET_SECTOR_MODE`
+
+Payload:
+- `[0x5B, enabled, fade_speed, sector_count]`
+- `enabled`: `0|1`
+- `fade_speed`: `0..255` (higher = faster crossfade)
+- `sector_count`: `1..255` (informative max event sector id)
+
+Response:
+- status `OK, extra=0x5B`
+- `WS_SECTOR_MODE` frame (`subtype=0x4B`)
+
+### `0x5C` `WS_GET_SECTOR_MODE`
+
+Payload:
+- `[0x5C]`
+
+Response:
+- status `OK, extra=0x5C`
+- `WS_SECTOR_MODE` frame (`subtype=0x4B`)
+
+### `0x5D` `WS_SET_SECTOR_ZONE`
+
+Payload:
+- `[0x5D, idx, start_led, end_led, sector, color_lo, color_hi]`
+- `idx`: `1..32`
+- `start_led/end_led`: 1-based LED range (`0` disables this zone)
+- `sector`: event sector id (`0` disables this zone)
+- `color`: RGB565 (`uint16 LE`)
+
+Response:
+- status `OK, extra=0x5D`
+- `WS_SECTOR_ZONE` frame (`subtype=0x4C`) for updated `idx`
+
+### `0x5E` `WS_GET_SECTOR_ZONE`
+
+Payload:
+- `[0x5E]` or `[0x5E, idx]`
+- `idx=0`: return all configured zones (`1..32`)
+- `idx=1..32`: return single zone
+
+Response:
+- status `OK, extra=0x5E`
+- one or more `WS_SECTOR_ZONE` frame(s) (`subtype=0x4C`)
 
 ### `0x6E` `HMC_SET_CFG`
 
@@ -431,7 +499,7 @@ Event type IDs:
 
 ### `0x48` `WS_ANIM`
 
-- Byte2: animation mode (`0..5`)
+- Byte2: animation mode (`0..6`)
 - Byte3: speed (`0..255`)
 - Byte4..7: reserved (`0x00`)
 
@@ -441,6 +509,35 @@ Event type IDs:
 - Byte3: fade half-width in px
 - Byte4..5: color1 RGB565 (`uint16 LE`)
 - Byte6..7: color2 RGB565 (`uint16 LE`)
+
+### `0x4A` `WS_SECTOR_COLOR`
+
+- Byte2: sector index (`1..8`)
+- Byte3: red (`0..255`)
+- Byte4: green (`0..255`)
+- Byte5: blue (`0..255`)
+- Byte6: max supported sectors (`8`)
+- Byte7: reserved (`0x00`)
+
+Note:
+- legacy compatibility frame (1..8 sector palette)
+
+### `0x4B` `WS_SECTOR_MODE`
+
+- Byte2: sector-follow enabled (`0|1`)
+- Byte3: fade speed (`0..255`)
+- Byte4: configured sector count (`1..255`)
+- Byte5: active sector (from event state)
+- Byte6: current target sector for crossfade
+- Byte7: max configurable zones (`32`)
+
+### `0x4C` `WS_SECTOR_ZONE`
+
+- Byte2: zone index (`1..32`)
+- Byte3: start LED index (1-based, `0` = disabled)
+- Byte4: end LED index (1-based)
+- Byte5: event sector id (`0` = disabled)
+- Byte6..7: RGB565 color (`uint16 LE`)
 
 ### `0x31` `STATUS`
 
