@@ -42,6 +42,9 @@ static SPI_HandleTypeDef g_hspi;
 static uint8_t g_spi_ready;
 static uint8_t g_tx_buf[WS2812_TX_MAX_BYTES];
 
+static void ws_rgb565_to_rgb888(uint16_t c, uint8_t *r, uint8_t *g, uint8_t *b);
+static void ws_hue_to_rgb(uint8_t hue, uint8_t *r, uint8_t *g, uint8_t *b);
+
 static uint8_t ws_scale_u8(uint8_t value, uint8_t scale)
 {
     return (uint8_t)(((uint16_t)value * (uint16_t)scale + 127U) / 255U);
@@ -70,6 +73,154 @@ static uint8_t ws_lerp_u8(uint8_t a, uint8_t b, uint16_t t, uint16_t t_max)
         return b;
     }
     return (uint8_t)((((t_max - t) * av) + (t * bv) + (t_max / 2U)) / t_max);
+}
+
+static uint8_t ws_collect_sorted_stops(
+    uint8_t n,
+    uint8_t *stop_pos,
+    uint8_t *stop_r,
+    uint8_t *stop_g,
+    uint8_t *stop_b
+)
+{
+    uint8_t stop_count = 0U;
+
+    for (uint8_t i = 0U; i < WS2812_MAX_ZONES; ++i) {
+        uint8_t pos = g_ws.zones[i].pos_led;
+        uint8_t r, g, b;
+        if (pos == 0U || pos > n) {
+            continue;
+        }
+        ws_rgb565_to_rgb888(g_ws.zones[i].color_rgb565, &r, &g, &b);
+        if (stop_count < WS2812_MAX_ZONES) {
+            stop_pos[stop_count] = pos;
+            stop_r[stop_count] = r;
+            stop_g[stop_count] = g;
+            stop_b[stop_count] = b;
+            ++stop_count;
+        }
+    }
+
+    for (uint8_t i = 1U; i < stop_count; ++i) {
+        uint8_t p = stop_pos[i];
+        uint8_t r = stop_r[i];
+        uint8_t g = stop_g[i];
+        uint8_t b = stop_b[i];
+        uint8_t j = i;
+        while (j > 0U && stop_pos[j - 1U] > p) {
+            stop_pos[j] = stop_pos[j - 1U];
+            stop_r[j] = stop_r[j - 1U];
+            stop_g[j] = stop_g[j - 1U];
+            stop_b[j] = stop_b[j - 1U];
+            --j;
+        }
+        stop_pos[j] = p;
+        stop_r[j] = r;
+        stop_g[j] = g;
+        stop_b[j] = b;
+    }
+
+    if (stop_count > 1U) {
+        uint8_t w = 0U;
+        for (uint8_t i = 0U; i < stop_count; ++i) {
+            if (w > 0U && stop_pos[w - 1U] == stop_pos[i]) {
+                stop_r[w - 1U] = stop_r[i];
+                stop_g[w - 1U] = stop_g[i];
+                stop_b[w - 1U] = stop_b[i];
+                continue;
+            }
+            stop_pos[w] = stop_pos[i];
+            stop_r[w] = stop_r[i];
+            stop_g[w] = stop_g[i];
+            stop_b[w] = stop_b[i];
+            ++w;
+        }
+        stop_count = w;
+    }
+
+    return stop_count;
+}
+
+static void ws_sample_gradient(
+    uint8_t led_idx,
+    uint8_t n,
+    uint8_t stop_count,
+    const uint8_t *stop_pos,
+    const uint8_t *stop_r,
+    const uint8_t *stop_g,
+    const uint8_t *stop_b,
+    uint8_t *r,
+    uint8_t *g,
+    uint8_t *b
+)
+{
+    *r = g_ws.r;
+    *g = g_ws.g;
+    *b = g_ws.b;
+
+    if (n == 0U || led_idx >= n) {
+        *r = 0U;
+        *g = 0U;
+        *b = 0U;
+        return;
+    }
+    if (stop_count == 0U) {
+        return;
+    }
+    if (stop_count == 1U) {
+        *r = stop_r[0];
+        *g = stop_g[0];
+        *b = stop_b[0];
+        return;
+    }
+
+    {
+        uint16_t p = (uint16_t)led_idx + 1U;
+        uint8_t seg = 0U;
+        for (uint8_t s = 0U; s < stop_count; ++s) {
+            uint16_t a = stop_pos[s];
+            uint16_t bpos = (s + 1U < stop_count) ? stop_pos[s + 1U] : (uint16_t)(stop_pos[0] + n);
+            uint16_t p2 = (p < a) ? (uint16_t)(p + n) : p;
+            if (p2 >= a && p2 <= bpos) {
+                seg = s;
+                break;
+            }
+        }
+
+        {
+            uint16_t a = stop_pos[seg];
+            uint16_t bpos = (seg + 1U < stop_count) ? stop_pos[seg + 1U] : (uint16_t)(stop_pos[0] + n);
+            uint16_t p2 = (p < a) ? (uint16_t)(p + n) : p;
+            uint16_t t = (uint16_t)(p2 - a);
+            uint16_t tmax = (uint16_t)(bpos - a);
+            uint8_t nseg = (uint8_t)((seg + 1U) % stop_count);
+            *r = ws_lerp_u8(stop_r[seg], stop_r[nseg], t, tmax);
+            *g = ws_lerp_u8(stop_g[seg], stop_g[nseg], t, tmax);
+            *b = ws_lerp_u8(stop_b[seg], stop_b[nseg], t, tmax);
+        }
+    }
+}
+
+static void ws_sector_tint_rgb(uint8_t sector, uint8_t *r, uint8_t *g, uint8_t *b)
+{
+    if (sector == 0U) {
+        *r = 255U;
+        *g = 255U;
+        *b = 255U;
+        return;
+    }
+    if (sector <= 8U) {
+        uint8_t idx = (uint8_t)(sector - 1U);
+        *r = g_ws.sector_colors[idx][0];
+        *g = g_ws.sector_colors[idx][1];
+        *b = g_ws.sector_colors[idx][2];
+        return;
+    }
+    {
+        uint8_t denom = (g_ws.sector_count == 0U) ? 1U : g_ws.sector_count;
+        uint8_t hue = (uint8_t)((((uint16_t)(sector - 1U)) * 255U) / denom);
+        ws_hue_to_rgb(hue, r, g, b);
+    }
 }
 
 static void ws_rgb565_to_rgb888(uint16_t c, uint8_t *r, uint8_t *g, uint8_t *b)
@@ -283,60 +434,7 @@ static void WS2812_RenderGradient(void)
     uint8_t stop_b[WS2812_MAX_ZONES];
     uint8_t stop_count = 0U;
 
-    for (uint8_t i = 0U; i < WS2812_MAX_ZONES; ++i) {
-        uint8_t pos = g_ws.zones[i].pos_led;
-        uint8_t r, g, b;
-        if (pos == 0U || pos > n) {
-            continue;
-        }
-        ws_rgb565_to_rgb888(g_ws.zones[i].color_rgb565, &r, &g, &b);
-        if (stop_count < WS2812_MAX_ZONES) {
-            stop_pos[stop_count] = pos;
-            stop_r[stop_count] = r;
-            stop_g[stop_count] = g;
-            stop_b[stop_count] = b;
-            ++stop_count;
-        }
-    }
-
-    /* Sort by position. */
-    for (uint8_t i = 1U; i < stop_count; ++i) {
-        uint8_t p = stop_pos[i];
-        uint8_t r = stop_r[i];
-        uint8_t g = stop_g[i];
-        uint8_t b = stop_b[i];
-        uint8_t j = i;
-        while (j > 0U && stop_pos[j - 1U] > p) {
-            stop_pos[j] = stop_pos[j - 1U];
-            stop_r[j] = stop_r[j - 1U];
-            stop_g[j] = stop_g[j - 1U];
-            stop_b[j] = stop_b[j - 1U];
-            --j;
-        }
-        stop_pos[j] = p;
-        stop_r[j] = r;
-        stop_g[j] = g;
-        stop_b[j] = b;
-    }
-
-    /* Merge duplicate positions (last wins). */
-    if (stop_count > 1U) {
-        uint8_t w = 0U;
-        for (uint8_t i = 0U; i < stop_count; ++i) {
-            if (w > 0U && stop_pos[w - 1U] == stop_pos[i]) {
-                stop_r[w - 1U] = stop_r[i];
-                stop_g[w - 1U] = stop_g[i];
-                stop_b[w - 1U] = stop_b[i];
-                continue;
-            }
-            stop_pos[w] = stop_pos[i];
-            stop_r[w] = stop_r[i];
-            stop_g[w] = stop_g[i];
-            stop_b[w] = stop_b[i];
-            ++w;
-        }
-        stop_count = w;
-    }
+    stop_count = ws_collect_sorted_stops(n, stop_pos, stop_r, stop_g, stop_b);
 
     memset(g_tx_buf, 0, sizeof(g_tx_buf));
     for (uint16_t i = 0; i < APP_WS2812_STRIP_LEN; ++i) {
@@ -345,40 +443,7 @@ static void WS2812_RenderGradient(void)
             WS2812_PackPixel(0U, 0U, 0U, &bit_pos);
             continue;
         }
-
-        if (stop_count == 0U) {
-            r = g_ws.r;
-            g = g_ws.g;
-            b = g_ws.b;
-        } else if (stop_count == 1U) {
-            r = stop_r[0];
-            g = stop_g[0];
-            b = stop_b[0];
-        } else {
-            uint16_t p = (uint16_t)i + 1U;
-            uint8_t seg = 0U;
-            for (uint8_t s = 0U; s < stop_count; ++s) {
-                uint16_t a = stop_pos[s];
-                uint16_t bpos = (s + 1U < stop_count) ? stop_pos[s + 1U] : (uint16_t)(stop_pos[0] + n);
-                uint16_t p2 = (p < a) ? (uint16_t)(p + n) : p;
-                if (p2 >= a && p2 <= bpos) {
-                    seg = s;
-                    break;
-                }
-            }
-
-            {
-                uint16_t a = stop_pos[seg];
-                uint16_t bpos = (seg + 1U < stop_count) ? stop_pos[seg + 1U] : (uint16_t)(stop_pos[0] + n);
-                uint16_t p2 = (p < a) ? (uint16_t)(p + n) : p;
-                uint16_t t = (uint16_t)(p2 - a);
-                uint16_t tmax = (uint16_t)(bpos - a);
-                uint8_t nseg = (uint8_t)((seg + 1U) % stop_count);
-                r = ws_lerp_u8(stop_r[seg], stop_r[nseg], t, tmax);
-                g = ws_lerp_u8(stop_g[seg], stop_g[nseg], t, tmax);
-                b = ws_lerp_u8(stop_b[seg], stop_b[nseg], t, tmax);
-            }
-        }
+        ws_sample_gradient((uint8_t)i, n, stop_count, stop_pos, stop_r, stop_g, stop_b, &r, &g, &b);
         r = ws_scale_u8(r, g_ws.brightness);
         g = ws_scale_u8(g, g_ws.brightness);
         b = ws_scale_u8(b, g_ws.brightness);
@@ -390,21 +455,33 @@ static void WS2812_RenderGradient(void)
 static void WS2812_UpdateSectorTarget(void)
 {
     uint8_t n = ws_active_len();
-    uint8_t r = 0U, g = 0U, b = 0U;
+    uint8_t stop_pos[WS2812_MAX_ZONES];
+    uint8_t stop_r[WS2812_MAX_ZONES];
+    uint8_t stop_g[WS2812_MAX_ZONES];
+    uint8_t stop_b[WS2812_MAX_ZONES];
+    uint8_t stop_count = 0U;
+    uint8_t tint_r = 255U;
+    uint8_t tint_g = 255U;
+    uint8_t tint_b = 255U;
 
     memset(g_ws.sector_tgt_led, 0, sizeof(g_ws.sector_tgt_led));
     g_ws.sector_target = 0U;
 
-    if (!g_ws.sector_mode_enabled || g_ws.sector_active == 0U) {
+    if (!g_ws.sector_mode_enabled) {
         return;
     }
-    if (g_ws.sector_active <= 8U) {
-        uint8_t idx = (uint8_t)(g_ws.sector_active - 1U);
-        r = g_ws.sector_colors[idx][0];
-        g = g_ws.sector_colors[idx][1];
-        b = g_ws.sector_colors[idx][2];
-    }
+
+    stop_count = ws_collect_sorted_stops(n, stop_pos, stop_r, stop_g, stop_b);
+    ws_sector_tint_rgb(g_ws.sector_active, &tint_r, &tint_g, &tint_b);
+
     for (uint16_t led = 0U; led < n; ++led) {
+        uint8_t r = 0U, g = 0U, b = 0U;
+        ws_sample_gradient((uint8_t)led, n, stop_count, stop_pos, stop_r, stop_g, stop_b, &r, &g, &b);
+        if (g_ws.sector_active != 0U) {
+            r = ws_scale_u8(r, tint_r);
+            g = ws_scale_u8(g, tint_g);
+            b = ws_scale_u8(b, tint_b);
+        }
         g_ws.sector_tgt_led[led][0] = r;
         g_ws.sector_tgt_led[led][1] = g;
         g_ws.sector_tgt_led[led][2] = b;
@@ -527,6 +604,7 @@ void WS2812_SetColor(uint8_t r, uint8_t g, uint8_t b)
     g_ws.r = r;
     g_ws.g = g;
     g_ws.b = b;
+    WS2812_UpdateSectorTarget();
     g_ws.dirty = 1U;
 }
 
@@ -578,6 +656,7 @@ void WS2812_SetGradient(uint8_t split_idx, uint8_t fade_px, uint16_t c1_rgb565, 
         g_ws.zones[i].pos_led = 0U;
         g_ws.zones[i].color_rgb565 = 0U;
     }
+    WS2812_UpdateSectorTarget();
     g_ws.dirty = 1U;
 }
 
@@ -668,6 +747,7 @@ void WS2812_SetSectorZone(uint8_t idx, uint8_t pos_led, uint16_t color_rgb565)
         z->pos_led = 0U;
         z->color_rgb565 = 0U;
     }
+    WS2812_UpdateSectorTarget();
     g_ws.dirty = 1U;
 }
 

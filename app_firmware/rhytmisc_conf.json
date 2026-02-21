@@ -31,15 +31,47 @@
         "fade_out_on_sector_change": true,
         "bank": 0,
         "preset": 0
+      },
+      "led": {
+        "enabled": true,
+        "strip_len": 60,
+        "brightness": 86,
+        "base_mode": "gradient",
+        "base_speed": 0,
+        "sector_fade_ms": 900,
+        "sector_fade_steps": 12,
+        "gradient": [
+          { "pos": 1, "color": "#D00000" },
+          { "pos": 20, "color": "#FF9000" },
+          { "pos": 40, "color": "#FFE030" },
+          { "pos": 55, "color": "#B04000" }
+        ],
+        "sector_gradients": {
+          "1": [{ "pos": 1, "color": "#C03030" }, { "pos": 20, "color": "#FF7030" }, { "pos": 40, "color": "#FFB030" }, { "pos": 55, "color": "#802020" }],
+          "2": [{ "pos": 1, "color": "#B05020" }, { "pos": 20, "color": "#FF9030" }, { "pos": 40, "color": "#FFD030" }, { "pos": 55, "color": "#806020" }],
+          "3": [{ "pos": 1, "color": "#808020" }, { "pos": 20, "color": "#B0D030" }, { "pos": 40, "color": "#E0FF40" }, { "pos": 55, "color": "#406020" }],
+          "4": [{ "pos": 1, "color": "#408030" }, { "pos": 20, "color": "#50C050" }, { "pos": 40, "color": "#80FF80" }, { "pos": 55, "color": "#205020" }],
+          "5": [{ "pos": 1, "color": "#206050" }, { "pos": 20, "color": "#30A090" }, { "pos": 40, "color": "#40D0D0" }, { "pos": 55, "color": "#204060" }],
+          "6": [{ "pos": 1, "color": "#204080" }, { "pos": 20, "color": "#4060C0" }, { "pos": 40, "color": "#8080FF" }, { "pos": 55, "color": "#302060" }]
+        },
+        "on_play": {
+          "enabled": false,
+          "mode": "breathe",
+          "speed": 240,
+          "duration_ms": 180
+        },
+        "send_retries": 2,
+        "command_spacing_ms": 1,
+        "keepalive_ms": 0
       }
     },
     "2": {
       "event_source": "hardware",
       "exclude_from_beat_quantize": false,
       "note_map": [60, 61, 63, 65, 66, 68],
-      "note_duration_ms": 3500,
+      "note_duration_ms": 2000,
       "fadein_ms": 25,
-      "fadeout_ms": 960,
+      "fadeout_ms": 50,
       "velocity": 108,
       "transpose": 0,
       "controls": {
@@ -52,10 +84,42 @@
         "chorus": 10
       },
       "instrument": {
-        "soundfont": "../../sounds/bell2.sf2",
+        "soundfont": "../../sounds/violin.sf2",
         "fade_out_on_sector_change": true,
         "bank": 0,
-        "preset": 0
+        "preset": 1
+      },
+      "led": {
+        "enabled": true,
+        "strip_len": 60,
+        "brightness": 92,
+        "base_mode": "gradient",
+        "base_speed": 0,
+        "sector_fade_ms": 900,
+        "sector_fade_steps": 12,
+        "gradient": [
+          { "pos": 1, "color": "#0018FF" },
+          { "pos": 20, "color": "#0050FF" },
+          { "pos": 40, "color": "#009CFF" },
+          { "pos": 55, "color": "#2020A0" }
+        ],
+        "sector_gradients": {
+          "1": [{ "pos": 1, "color": "#0020FF" }, { "pos": 20, "color": "#1060FF" }, { "pos": 40, "color": "#30A0FF" }, { "pos": 55, "color": "#202080" }],
+          "2": [{ "pos": 1, "color": "#0060FF" }, { "pos": 20, "color": "#20A0FF" }, { "pos": 40, "color": "#40D0FF" }, { "pos": 55, "color": "#205080" }],
+          "3": [{ "pos": 1, "color": "#0090FF" }, { "pos": 20, "color": "#30C0FF" }, { "pos": 40, "color": "#40FFE0" }, { "pos": 55, "color": "#206070" }],
+          "4": [{ "pos": 1, "color": "#30C0FF" }, { "pos": 20, "color": "#40FFE0" }, { "pos": 40, "color": "#80FF80" }, { "pos": 55, "color": "#306040" }],
+          "5": [{ "pos": 1, "color": "#80FF80" }, { "pos": 20, "color": "#D0FF60" }, { "pos": 40, "color": "#FFE040" }, { "pos": 55, "color": "#706020" }],
+          "6": [{ "pos": 1, "color": "#FFE040" }, { "pos": 20, "color": "#FFA030" }, { "pos": 40, "color": "#FF6030" }, { "pos": 55, "color": "#802030" }]
+        },
+        "on_play": {
+          "enabled": false,
+          "mode": "blink",
+          "speed": 250,
+          "duration_ms": 150
+        },
+        "send_retries": 2,
+        "command_spacing_ms": 1,
+        "keepalive_ms": 0
       }
     }
   }

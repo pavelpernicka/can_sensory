@@ -337,6 +337,7 @@ class AppCanClient:
     def wait_status(self, expected_extra: int, timeout: float | None = None) -> bytes:
         deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
         deferred = deque()
+        last_mismatch_err: tuple[int, int] | None = None
         while time.monotonic() < deadline:
             data = self._next_frame(max(0.0, deadline - time.monotonic()))
             if data is None:
@@ -349,6 +350,8 @@ class AppCanClient:
                 continue
 
             if data[1] != expected_extra:
+                if data[0] != STATUS_OK:
+                    last_mismatch_err = (int(data[0]), int(data[1]))
                 continue
 
             st = data[0]
@@ -362,6 +365,12 @@ class AppCanClient:
 
         if deferred:
             self._pending_frames.extendleft(reversed(deferred))
+        if last_mismatch_err is not None:
+            st, extra = last_mismatch_err
+            raise TimeoutError(
+                f"Timeout waiting for status extra=0x{expected_extra:02X}; "
+                f"last status was {STATUS_TEXT.get(st, f'0x{st:02X}')} extra=0x{extra:02X}"
+            )
         raise TimeoutError(f"Timeout waiting for status extra=0x{expected_extra:02X}")
 
     def wait_frame(self, predicate: Callable[[bytes], bool], timeout: float | None = None) -> bytes:

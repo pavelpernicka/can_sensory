@@ -326,8 +326,8 @@ class CalibApp(Gtk.Application):
         }
         self.ws_cfg = {
             "enabled": False,
-            "strip_len": 0,
-            "strip_len_max": 0,
+            "strip_len": 1,
+            "strip_len_max": 255,
             "brightness": 64,
             "r": 255,
             "g": 255,
@@ -1596,14 +1596,58 @@ class CalibApp(Gtk.Application):
                 self.client.timeout = old_timeout
 
     def initial_load(self):
-        def _load_locked():
+        def _discover_ids_locked(timeout_s: float):
+            found = discover_devices(
+                channel=self.channel,
+                interface=self.interface,
+                timeout=max(0.30, float(timeout_s)),
+            )
+            ids = sorted({int(item["device_id"]) for item in found})
+            self.known_device_ids.update(ids)
+            return found, ids
+
+        def _load_all_locked():
             self.action_status_locked()
             self.action_refresh_streams_locked()
             self.action_hmc_get_locked()
             self.action_ws_get_optional_locked()
             self.action_load_runtime_calib_locked()
 
-        self.with_lock(_load_locked, min_timeout=CMD_TIMEOUT_SHORT)
+        def _load_locked():
+            try:
+                _load_all_locked()
+                return self.active_device_id, None
+            except Exception as first_exc:
+                found, ids = _discover_ids_locked(max(CMD_TIMEOUT_SHORT, self.client.timeout))
+                if not ids:
+                    raise RuntimeError(
+                        f"{first_exc}; no devices replied on {self.interface}:{self.channel}"
+                    ) from first_exc
+                candidates = [self.active_device_id] + [did for did in ids if did != self.active_device_id]
+                last_exc = first_exc
+                selected = self.active_device_id
+                for did in candidates:
+                    try:
+                        self.client.set_device_id(did)
+                        _load_all_locked()
+                        selected = did
+                        return selected, first_exc
+                    except Exception as exc:
+                        last_exc = exc
+                raise RuntimeError(f"{last_exc}; discovered ids={ids}") from last_exc
+
+        selected, fallback_exc = self.with_lock(_load_locked, min_timeout=CMD_TIMEOUT_SHORT)
+        self.active_device_id = int(selected)
+        self.known_device_ids.add(self.active_device_id)
+        GLib.idle_add(self.refresh_device_info_label)
+        GLib.idle_add(self.update_known_devices_label)
+        if self.device_id_spin is not None:
+            GLib.idle_add(self.device_id_spin.set_value, float(self.active_device_id))
+        if fallback_exc is not None:
+            self.reset_active_device_runtime()
+            self.log(
+                f"Auto-switched to device {self.active_device_id} after initial timeout: {fallback_exc}"
+            )
         self.log("Initial state loaded")
 
     def monitor_loop(self):
@@ -2787,7 +2831,10 @@ class CalibApp(Gtk.Application):
             if self.ws_brightness_spin is not None:
                 self.ws_brightness_spin.set_value(float(self.ws_cfg["brightness"]))
             if self.ws_len_spin is not None:
-                max_len = max(1, int(self.ws_cfg.get("strip_len_max", 255)))
+                max_len = int(self.ws_cfg.get("strip_len_max", 255))
+                if max_len <= 1:
+                    max_len = 255
+                max_len = max(1, max_len)
                 self.ws_len_spin.set_range(1, max_len)
                 self.ws_len_spin.set_value(float(max(1, int(self.ws_cfg.get("strip_len", 1)))))
             if self.ws_r_spin is not None:
@@ -2884,21 +2931,54 @@ class CalibApp(Gtk.Application):
             return
         new_id = int(self.device_id_spin.get_value())
 
-        def _switch_locked():
-            self.client.set_device_id(new_id)
+        def _load_after_set_locked(target_id: int):
+            self.client.set_device_id(target_id)
             self.action_status_locked()
             self.action_refresh_streams_locked()
             self.action_hmc_get_locked()
             self.action_ws_get_optional_locked()
             self.action_load_runtime_calib_locked()
 
-        self.with_lock(_switch_locked, min_timeout=CMD_TIMEOUT_LONG)
-        self.active_device_id = new_id
-        self.known_device_ids.add(new_id)
+        def _switch_locked():
+            try:
+                _load_after_set_locked(new_id)
+                return new_id, None
+            except Exception as first_exc:
+                found = discover_devices(
+                    channel=self.channel,
+                    interface=self.interface,
+                    timeout=max(CMD_TIMEOUT_SHORT, self.client.timeout),
+                )
+                ids = sorted({int(item["device_id"]) for item in found})
+                self.known_device_ids.update(ids)
+                if not ids:
+                    raise RuntimeError(
+                        f"{first_exc}; no devices replied on {self.interface}:{self.channel}"
+                    ) from first_exc
+                candidates = [new_id] if new_id in ids else ids
+                last_exc = first_exc
+                for did in candidates:
+                    try:
+                        _load_after_set_locked(did)
+                        return did, first_exc
+                    except Exception as exc:
+                        last_exc = exc
+                raise RuntimeError(f"{last_exc}; discovered ids={ids}") from last_exc
+
+        selected_id, fallback_exc = self.with_lock(_switch_locked, min_timeout=CMD_TIMEOUT_LONG)
+        self.active_device_id = int(selected_id)
+        self.known_device_ids.add(self.active_device_id)
         self.reset_active_device_runtime()
         GLib.idle_add(self.refresh_device_info_label)
         GLib.idle_add(self.update_known_devices_label)
-        self.log(f"Active device switched to {new_id}")
+        if self.device_id_spin is not None:
+            GLib.idle_add(self.device_id_spin.set_value, float(self.active_device_id))
+        if fallback_exc is not None:
+            self.log(
+                f"Switch fallback used. Requested {new_id}, connected {self.active_device_id}: {fallback_exc}"
+            )
+        else:
+            self.log(f"Active device switched to {new_id}")
 
     def action_discover_devices(self):
         def _scan_locked():
@@ -3075,7 +3155,10 @@ class CalibApp(Gtk.Application):
         try:
             ln = self.client.ws_get_length()
         except Exception:
-            ln = {"strip_len": int(st.get("strip_len", 0)), "max_strip_len": int(st.get("strip_len", 0))}
+            ln = {
+                "strip_len": int(st.get("strip_len", 1)),
+                "max_strip_len": max(255, int(st.get("strip_len", 1))),
+            }
         anim = self.client.ws_get_anim()
         grad = self.client.ws_get_gradient()
         sector_mode = None

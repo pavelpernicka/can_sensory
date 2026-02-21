@@ -21,13 +21,20 @@ try:
 except ModuleNotFoundError:
     fluidsynth = None
 
+from app_can_tool import AppCanClient
 from rhytmics_io import (
     CanQueueListener,
     DeviceConfig,
+    LedConfig,
     load_device_configs,
     load_global_player_config,
     resolve_local,
 )
+
+CMD_WS_SET_ALL = 0x53
+CMD_WS_SET_ANIM = 0x55
+CMD_WS_SET_SECTOR_ZONE = 0x5D
+CMD_WS_SET_LENGTH = 0x5F
 
 
 @dataclass
@@ -38,6 +45,393 @@ class DeviceVoice:
     note_on_counts: dict[int, int] = field(default_factory=dict)
     note_deadlines: dict[int, deque[float]] = field(default_factory=dict)
     program_key: tuple[int, int, int] | None = None
+
+
+@dataclass
+class LedDeviceState:
+    cfg: LedConfig
+    simple_mode: bool = False
+    last_sector: int = 0
+    current_stops: list[tuple[int, int]] = field(default_factory=list)  # (pos,color565)
+    restore_pending: bool = False
+    restore_due_s: float = 0.0
+    last_keepalive_s: float = 0.0
+
+
+class LedCanController:
+    def __init__(
+        self,
+        bus: can.BusABC,
+        devices: dict[int, DeviceConfig],
+        debug: bool = False,
+        simple_devices: set[int] | None = None,
+    ):
+        self.bus = bus
+        self.debug = bool(debug)
+        self._states: dict[int, LedDeviceState] = {}
+        simple_set = set() if simple_devices is None else {int(x) for x in simple_devices}
+        for did, cfg in devices.items():
+            if cfg.led is not None and cfg.led.enabled:
+                self._states[int(did)] = LedDeviceState(
+                    cfg=cfg.led,
+                    simple_mode=(int(did) in simple_set),
+                )
+        self._q: queue.Queue[tuple[int, bytes, int]] = queue.Queue(maxsize=8192)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        if self._states:
+            self._thread = threading.Thread(target=self._worker, daemon=True, name="rhytmics-led")
+
+    def enabled(self) -> bool:
+        return bool(self._states)
+
+    def start(self) -> None:
+        if self._thread is None:
+            return
+        self._thread.start()
+        for did in sorted(self._states.keys()):
+            self.apply_base(did, clear_all=True)
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.5)
+
+    def _queue_cmd(self, did: int, payload: bytes, retries: int) -> None:
+        if did not in self._states:
+            return
+        item = (int(did), bytes(payload[:8]), int(max(0, retries)))
+        try:
+            self._q.put_nowait(item)
+        except queue.Full:
+            try:
+                self._q.get_nowait()
+                self._q.put_nowait(item)
+            except (queue.Empty, queue.Full):
+                pass
+
+    @staticmethod
+    def _cmd_set_length(strip_len: int) -> bytes:
+        return bytes([CMD_WS_SET_LENGTH, int(max(1, min(255, strip_len))) & 0xFF])
+
+    @staticmethod
+    def _cmd_set_all(enabled: bool, brightness: int, r: int, g: int, b: int) -> bytes:
+        return bytes(
+            [
+                CMD_WS_SET_ALL,
+                1 if enabled else 0,
+                int(max(0, min(255, brightness))) & 0xFF,
+                int(max(0, min(255, r))) & 0xFF,
+                int(max(0, min(255, g))) & 0xFF,
+                int(max(0, min(255, b))) & 0xFF,
+            ]
+        )
+
+    @staticmethod
+    def _cmd_set_zone(idx: int, pos: int, color565: int) -> bytes:
+        c = int(max(0, min(0xFFFF, color565)))
+        return bytes(
+            [
+                CMD_WS_SET_SECTOR_ZONE,
+                int(max(1, min(32, idx))) & 0xFF,
+                int(max(0, min(255, pos))) & 0xFF,
+                c & 0xFF,
+                (c >> 8) & 0xFF,
+            ]
+        )
+
+    @staticmethod
+    def _cmd_set_anim(mode: int, speed: int) -> bytes:
+        return bytes([CMD_WS_SET_ANIM, int(max(0, min(6, mode))) & 0xFF, int(max(0, min(255, speed))) & 0xFF])
+
+    @staticmethod
+    def _rgb565_to_rgb888(c: int) -> tuple[int, int, int]:
+        c = int(max(0, min(0xFFFF, c)))
+        r5 = (c >> 11) & 0x1F
+        g6 = (c >> 5) & 0x3F
+        b5 = c & 0x1F
+        r = (r5 * 255 + 15) // 31
+        g = (g6 * 255 + 31) // 63
+        b = (b5 * 255 + 15) // 31
+        return int(r), int(g), int(b)
+
+    @staticmethod
+    def _rgb888_to_rgb565(r: int, g: int, b: int) -> int:
+        r5 = (int(max(0, min(255, r))) * 31 + 127) // 255
+        g6 = (int(max(0, min(255, g))) * 63 + 127) // 255
+        b5 = (int(max(0, min(255, b))) * 31 + 127) // 255
+        return int((r5 << 11) | (g6 << 5) | b5)
+
+    @classmethod
+    def _lerp_rgb565(cls, c0: int, c1: int, num: int, den: int) -> int:
+        if den <= 0:
+            return int(c1)
+        r0, g0, b0 = cls._rgb565_to_rgb888(c0)
+        r1, g1, b1 = cls._rgb565_to_rgb888(c1)
+        r = (r0 * (den - num) + r1 * num) // den
+        g = (g0 * (den - num) + g1 * num) // den
+        b = (b0 * (den - num) + b1 * num) // den
+        return cls._rgb888_to_rgb565(r, g, b)
+
+    @staticmethod
+    def _stops_to_pairs(stops: list) -> list[tuple[int, int]]:
+        out: list[tuple[int, int]] = []
+        for s in stops[:32]:
+            try:
+                out.append((int(s.pos), int(s.color_rgb565)))
+            except Exception:
+                continue
+        return out
+
+    def _sector_stops(self, state: LedDeviceState, sector: int) -> list[tuple[int, int]]:
+        cfg = state.cfg
+        if sector > 0 and int(sector) in cfg.sector_gradients:
+            return self._stops_to_pairs(cfg.sector_gradients[int(sector)])
+        return self._stops_to_pairs(cfg.gradient)
+
+    def _drop_pending_for_device(self, did: int) -> None:
+        kept: list[tuple[int, bytes, int]] = []
+        dropped = 0
+        while True:
+            try:
+                item = self._q.get_nowait()
+            except queue.Empty:
+                break
+            if int(item[0]) == int(did):
+                dropped += 1
+            else:
+                kept.append(item)
+        for item in kept:
+            try:
+                self._q.put_nowait(item)
+            except queue.Full:
+                break
+        if dropped > 0 and self.debug:
+            print(f"[dbg led] dropped {dropped} stale pending cmds for dev={did:02d}")
+
+    def _queue_apply_stops(
+        self,
+        did: int,
+        state: LedDeviceState,
+        stops: list[tuple[int, int]],
+        clear_all: bool,
+        set_state: bool,
+        set_anim: bool,
+    ) -> None:
+        cfg = state.cfg
+        retries = int(cfg.send_retries)
+        if set_state and cfg.strip_len is not None:
+            self._queue_cmd(did, self._cmd_set_length(cfg.strip_len), retries)
+        if set_state:
+            if stops:
+                base_r, base_g, base_b = self._rgb565_to_rgb888(stops[0][1])
+            else:
+                base_r, base_g, base_b = (255, 255, 255)
+            self._queue_cmd(did, self._cmd_set_all(True, cfg.brightness, base_r, base_g, base_b), retries)
+
+        if state.simple_mode:
+            mode = int(cfg.base_mode)
+            if mode == 5:
+                mode = 0
+            if set_anim:
+                self._queue_cmd(did, self._cmd_set_anim(mode, cfg.base_speed), retries)
+            return
+
+        for idx, (pos, color) in enumerate(stops[:32], start=1):
+            self._queue_cmd(did, self._cmd_set_zone(idx, pos, color), retries)
+        if clear_all:
+            for idx in range(len(stops) + 1, 33):
+                self._queue_cmd(did, self._cmd_set_zone(idx, 0, 0), retries)
+
+        if set_anim:
+            mode = int(cfg.base_mode)
+            if mode == 5 and not stops:
+                mode = 0
+            self._queue_cmd(did, self._cmd_set_anim(mode, cfg.base_speed), retries)
+
+    def apply_base(self, did: int, clear_all: bool) -> None:
+        state = self._states.get(did)
+        if state is None:
+            return
+        stops = self._sector_stops(state, state.last_sector)
+        self._queue_apply_stops(
+            did,
+            state,
+            stops,
+            clear_all=clear_all,
+            set_state=bool(clear_all),
+            set_anim=True,
+        )
+        state.current_stops = list(stops)
+        state.restore_pending = False
+        state.last_keepalive_s = time.monotonic()
+
+    def trigger_play(self, did: int) -> None:
+        state = self._states.get(did)
+        if state is None:
+            return
+        onp = state.cfg.on_play
+        if not onp.enabled:
+            return
+        self._queue_cmd(did, self._cmd_set_anim(onp.mode, onp.speed), state.cfg.send_retries)
+        dur_s = max(0.0, float(onp.duration_ms) / 1000.0)
+        if dur_s > 0.0:
+            state.restore_due_s = time.monotonic() + dur_s
+            state.restore_pending = True
+
+    def on_sector(self, did: int, sector: int) -> None:
+        state = self._states.get(did)
+        if state is None:
+            return
+        sector = int(max(0, min(255, int(sector))))
+        if state.last_sector == sector:
+            return
+        prev_stops = list(state.current_stops) if state.current_stops else self._sector_stops(state, state.last_sector)
+        target_stops = self._sector_stops(state, sector)
+        state.last_sector = sector
+        self._drop_pending_for_device(did)
+
+        cfg = state.cfg
+        steps = int(max(1, cfg.sector_fade_steps))
+        fade_ms = int(max(0, cfg.sector_fade_ms))
+        if steps <= 1 or fade_ms <= 0:
+            self._queue_apply_stops(
+                did,
+                state,
+                target_stops,
+                clear_all=True,
+                set_state=False,
+                set_anim=True,
+            )
+            state.current_stops = list(target_stops)
+            return
+
+        n = max(1, len(prev_stops), len(target_stops))
+        prev_pad = list(prev_stops) + [(0, 0)] * max(0, n - len(prev_stops))
+        tgt_pad = list(target_stops) + [(0, 0)] * max(0, n - len(target_stops))
+        for step in range(1, steps + 1):
+            inter: list[tuple[int, int]] = []
+            for i in range(n):
+                p0, c0 = prev_pad[i]
+                p1, c1 = tgt_pad[i]
+                pos = int((p0 * (steps - step) + p1 * step) / steps)
+                col = self._lerp_rgb565(c0, c1, step, steps)
+                inter.append((pos, col))
+            self._queue_apply_stops(
+                did,
+                state,
+                inter,
+                clear_all=(step == steps),
+                set_state=False,
+                set_anim=(step == steps),
+            )
+        state.current_stops = list(target_stops)
+
+    def _service_timers(self) -> None:
+        if not self._states:
+            return
+        now_s = time.monotonic()
+        for did, state in self._states.items():
+            cfg = state.cfg
+            if state.restore_pending and now_s >= state.restore_due_s:
+                self.apply_base(did, clear_all=False)
+            if cfg.keepalive_ms > 0:
+                period_s = float(cfg.keepalive_ms) / 1000.0
+                if period_s > 0.0 and (now_s - state.last_keepalive_s) >= period_s:
+                    self.apply_base(did, clear_all=False)
+
+    def _worker(self) -> None:
+        while not self._stop.is_set():
+            self._service_timers()
+            try:
+                did, payload, retries = self._q.get(timeout=0.01)
+            except queue.Empty:
+                continue
+            state = self._states.get(did)
+            spacing_s = 0.0 if state is None else float(max(0, state.cfg.command_spacing_ms)) / 1000.0
+            tries = max(1, int(retries) + 1)
+            for attempt in range(tries):
+                try:
+                    msg = can.Message(
+                        arbitration_id=0x600 + int(did),
+                        data=payload,
+                        is_extended_id=False,
+                    )
+                    self.bus.send(msg, timeout=0.01)
+                    break
+                except Exception as exc:
+                    if self.debug and attempt == (tries - 1):
+                        print(f"[dbg led] send failed dev={did:02d} cmd=0x{payload[0]:02X} err={exc}")
+                if spacing_s > 0.0:
+                    time.sleep(spacing_s)
+
+
+def apply_led_profile_verified(
+    interface: str,
+    channel: str,
+    device_id: int,
+    led: LedConfig,
+    debug: bool = False,
+) -> bool:
+    retries = max(0, int(led.send_retries))
+    delay_s = float(max(0, int(led.command_spacing_ms))) / 1000.0
+    stops = list(led.gradient[:32])
+    mode = int(led.base_mode if stops else 0)
+    strip_len = led.strip_len if led.strip_len is not None else None
+
+    for attempt in range(retries + 1):
+        client = None
+        try:
+            client = AppCanClient(channel=channel, interface=interface, device_id=device_id, timeout=0.35)
+            if strip_len is not None:
+                try:
+                    client.ws_set_length(int(strip_len))
+                    if delay_s > 0.0:
+                        time.sleep(delay_s)
+                except Exception:
+                    # Older firmware may not support strip-length command.
+                    pass
+            if stops:
+                c0 = int(stops[0].color_rgb565)
+                r5 = (c0 >> 11) & 0x1F
+                g6 = (c0 >> 5) & 0x3F
+                b5 = c0 & 0x1F
+                r0 = (r5 * 255 + 15) // 31
+                g0 = (g6 * 255 + 31) // 63
+                b0 = (b5 * 255 + 15) // 31
+                client.ws_set_all(True, int(led.brightness), int(r0), int(g0), int(b0))
+            else:
+                client.ws_set_all(True, int(led.brightness), 255, 255, 255)
+            if delay_s > 0.0:
+                time.sleep(delay_s)
+            for idx, stop in enumerate(stops, start=1):
+                client.ws_set_sector_zone(idx, int(stop.pos), int(stop.color_rgb565), readback=False)
+                if delay_s > 0.0:
+                    time.sleep(delay_s)
+            for idx in range(len(stops) + 1, 33):
+                client.ws_set_sector_zone(idx, 0, 0, readback=False)
+                if delay_s > 0.0:
+                    time.sleep(delay_s)
+            client.ws_set_anim(mode, int(led.base_speed))
+            if debug:
+                print(
+                    f"[dbg led] verified apply ok dev={device_id:02d} len={strip_len} "
+                    f"stops={len(stops)} mode={mode}/{int(led.base_speed)}"
+                )
+            return True
+        except Exception as exc:
+            if debug:
+                print(f"[dbg led] verified apply failed dev={device_id:02d} attempt={attempt+1} err={exc}")
+            if attempt >= retries:
+                return False
+            time.sleep(0.04)
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+    return False
 
 
 class FaustRuntime:
@@ -855,6 +1249,9 @@ def run() -> int:
         fadein_ms=args.fadein_ms,
         fadeout_ms=args.fadeout_ms,
     )
+    bus: can.BusABC | None = None
+    notifier: can.Notifier | None = None
+    led_controller: LedCanController | None = None
     try:
         channels = list(range(16))
         for idx, did in enumerate(sorted(devices.keys())):
@@ -868,6 +1265,31 @@ def run() -> int:
         )
         q: queue.Queue[tuple[int, int]] = queue.Queue(maxsize=4096)
         notifier = can.Notifier(bus, [CanQueueListener(q)], timeout=0.001)
+        led_profiles = {
+            did: cfg.led
+            for did, cfg in devices.items()
+            if cfg.led is not None and cfg.led.enabled
+        }
+        led_simple_devices: set[int] = set()
+        for did, led_cfg in led_profiles.items():
+            ok = apply_led_profile_verified(
+                interface=args.interface,
+                channel=can_channel,
+                device_id=did,
+                led=led_cfg,
+                debug=args.debug,
+            )
+            if not ok:
+                led_simple_devices.add(int(did))
+                print(f"[warn] LED verified setup failed for device {did}; falling back to async LED sender")
+        try:
+            led_controller = LedCanController(bus, devices, debug=args.debug, simple_devices=led_simple_devices)
+            led_controller.start()
+            if args.debug and led_controller.enabled():
+                print("[dbg led] controller enabled")
+        except Exception as exc:
+            led_controller = None
+            print(f"[warn] LED control disabled: {exc}")
 
         stop_event = threading.Event()
 
@@ -982,6 +1404,8 @@ def run() -> int:
                     force_retrigger=retrig,
                     fade_out_existing=fade_on_change,
                 )
+                if started and led_controller is not None:
+                    led_controller.trigger_play(device_id)
                 if args.debug and (started or stopped):
                     sf = instrument_label(cfg)
                     print(
@@ -1018,6 +1442,8 @@ def run() -> int:
                             fade_out_existing=pending_fade_on_change[did],
                         )
                         pending_retrigger[did] = False
+                        if started and led_controller is not None:
+                            led_controller.trigger_play(did)
 
                     if args.debug and (started or stopped):
                         sf = instrument_label(cfg)
@@ -1051,6 +1477,9 @@ def run() -> int:
             if cfg is None or cfg.event_source != "hardware":
                 return
 
+            if led_controller is not None:
+                led_controller.on_sector(did, sector)
+
             now_s = time.monotonic()
             if beat_quantize and not cfg.exclude_from_beat_quantize:
                 queue_sector(did, sector, now_s)
@@ -1083,9 +1512,22 @@ def run() -> int:
             if beat_quantize:
                 apply_beat(now)
 
-        notifier.stop()
-        bus.shutdown()
     finally:
+        if led_controller is not None:
+            try:
+                led_controller.close()
+            except Exception:
+                pass
+        if notifier is not None:
+            try:
+                notifier.stop()
+            except Exception:
+                pass
+        if bus is not None:
+            try:
+                bus.shutdown()
+            except Exception:
+                pass
         mixer.close()
 
     return 0
