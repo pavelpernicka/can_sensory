@@ -29,7 +29,7 @@
 
 #define APP_WS2812_GPIO_PORT          GPIOA
 #define APP_WS2812_PIN                GPIO_PIN_7
-#define APP_WS2812_STRIP_LEN          16U
+#define APP_WS2812_STRIP_LEN          64U
 
 // Addressing
 #define APP_DEVICE_ID                 0x01U // fallback

@@ -4,9 +4,9 @@
 
 #define WS2812_SPI_INSTANCE            SPI1
 #define WS2812_SPI_GPIO_AF             GPIO_AF5_SPI1
-#define WS2812_SYM_0                   0x18U  /* 11000 */
-#define WS2812_SYM_1                   0x1CU  /* 11100 */
-#define WS2812_RESET_BYTES             32U
+#define WS2812_SYM_0                   0x10U  /* 10000: 0.25us high @ 4MHz */
+#define WS2812_SYM_1                   0x1CU  /* 11100: 0.75us high @ 4MHz */
+#define WS2812_RESET_BYTES             64U    /* >80us low reset */
 #define WS2812_BYTES_PER_LED           15U    /* 24 bits * 5 encoded bits / 8 */
 #define WS2812_TX_MAX_BYTES            ((APP_WS2812_STRIP_LEN * WS2812_BYTES_PER_LED) + WS2812_RESET_BYTES)
 
@@ -81,6 +81,7 @@ void WS2812_Init(void)
     g_hspi.Init.NSSPMode = SPI_NSS_PULSE_DISABLE;
 
     g_spi_ready = (HAL_SPI_Init(&g_hspi) == HAL_OK) ? 1U : 0U;
+    HAL_Delay(2);
     WS2812_Apply();
 }
 
